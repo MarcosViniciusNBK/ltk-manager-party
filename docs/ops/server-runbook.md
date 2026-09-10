@@ -40,16 +40,28 @@ O serviço foi instalado em `/opt/ltk-room-server`:
 │   ├── main.rs              # Ponto de entrada, graceful shutdown e migrações
 │   ├── config.rs            # Configurações de porta e database
 │   ├── error.rs             # Mapeamento de erros estruturados HTTP/JSON
-│   ├── state.rs             # AppState compartilhado (pool de conexões, broadcasters WS)
+│   ├── auth.rs              # Argon2id e geração de tokens CSPRNG 256-bit
+│   ├── audit.rs             # Auditoria estruturada e sanitização de segredos
+│   ├── manifest.rs          # Validação e esquemas de manifestos de sala
+│   ├── rate_limit.rs        # Rate limiting por IP/sala contra brute-force
+│   ├── storage.rs           # Armazenamento CAS com HMAC-SHA256 e cotas
+│   ├── state.rs             # AppState compartilhado (pool, canais WS, CAS)
 │   └── routes/              # Endpoints HTTP e WebSocket
 │       ├── health.rs        # /health e /ready
 │       ├── version.rs       # /v1/version
-│       ├── ws.rs            # /v1/rooms/:room_id/ws
+│       ├── rooms.rs         # Ciclo de vida de salas, manifestos, acks e auditoria
+│       ├── blobs.rs         # Uploads/Downloads CAS com controle de acesso Zero-Trust
+│       ├── ws.rs            # /v1/rooms/:room_id/ws (presença em tempo real)
 │       └── mod.rs
 ├── migrations/              # Scripts SQL gerenciados pelo SQLx
-│   └── 20260910000001_initial_schema.sql
+│   ├── 20260910000001_initial_schema.sql
+│   ├── 20260910000002_auth_and_roles.sql
+│   ├── 20260910000003_revisions_and_presence.sql
+│   ├── 20260910000004_cas_storage.sql
+│   └── 20260910000005_audit_logs.sql
 └── data/                    # Volume de dados persistente (ignorado pelo git)
-    └── postgres/            # Diretório de dados do PostgreSQL 16
+    ├── postgres/            # Diretório de dados do PostgreSQL 16
+    └── blobs/               # Objetos imutáveis e uploads parciais (CAS)
 ```
 
 ---
@@ -221,6 +233,81 @@ curl http://177.153.59.168:3000/v1/rooms/minha-sala/manifest \
   -H "Authorization: Bearer <token>"
 ```
 
+### Verificar Hashes Ausentes (Upload Only Missing Hashes)
+
+```bash
+curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/blobs/check \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"hashes":["74237cf6d69c51d7ecfd807361e9bf04e489a2a7b850b0c532b2650f3372132a","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}'
+# Resposta (200 OK):
+# {"existing_hashes":["74237cf..."],"missing_hashes":["aaaaaa..."]}
+```
+
+### Requisitar URL Assinada de Upload (Owner / Staging)
+
+```bash
+curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/blobs/upload_url \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <owner_token>" \
+  -d '{"content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":2048,"format":"modpkg"}'
+# Resposta (200 OK):
+# {"content_hash":"aaaa...","upload_url":"http://177.153.59.168:3000/v1/blobs/upload/aaaa...?grant=<hmac>&expires=<ts>","expires_at":1757548800}
+```
+
+### Protocolo de Upload Resumável (transfer.rs)
+
+1. **Probe com `HEAD`**:
+
+   ```bash
+   curl -I "http://177.153.59.168:3000/v1/blobs/upload/<hash>?grant=<grant>&expires=<ts>"
+   # Cabeçalhos retornados:
+   # Upload-Offset: 0 (ou N bytes gravados até o momento)
+   # ETag: "<hash>"
+   ```
+
+2. **Upload com `PUT`**:
+   ```bash
+   curl -X PUT "http://177.153.59.168:3000/v1/blobs/upload/<hash>?grant=<grant>&expires=<ts>" \
+     -H "Content-Type: application/octet-stream" \
+     -H "Content-Range: bytes 0-2047/2048" \
+     --data-binary @arquivo.modpkg
+   # Resposta ao concluir (200 OK):
+   # X-Content-SHA256: <hash>
+   # ETag: "<hash>"
+   ```
+
+### Requisitar URL Assinada de Download (Membro)
+
+```bash
+curl http://177.153.59.168:3000/v1/rooms/minha-sala/blobs/<hash>/download_url \
+  -H "Authorization: Bearer <member_token>"
+# Resposta (200 OK):
+# {"content_hash":"<hash>","download_url":"http://177.153.59.168:3000/v1/blobs/download/<hash>?grant=<hmac>&expires=<ts>","expires_at":1757552400}
+```
+
+### Download com Suporte a Range (HTTP 206 Partial Content)
+
+```bash
+# Download completo
+curl "http://177.153.59.168:3000/v1/blobs/download/<hash>?grant=<grant>&expires=<ts>" -O
+
+# Download retomado ou parcial com Range
+curl -H "Range: bytes=1024-" "http://177.153.59.168:3000/v1/blobs/download/<hash>?grant=<grant>&expires=<ts>" -O
+# Resposta: 206 Partial Content com cabeçalho Content-Range: bytes 1024-2047/2048
+```
+
+### Auditoria e Histórico de Ações da Sala (Zero-Trust & Privacidade)
+
+```bash
+curl http://177.153.59.168:3000/v1/rooms/<room_id>/audit \
+  -H "Authorization: Bearer <token>"
+```
+
+- Retorna eventos de segurança auditados (`room_created`, `member_joined`, `manifest_published`, `revision_acknowledged`, `owner_transferred`, `upload_url_requested`, `download_url_requested`, `blob_uploaded`).
+- **Garantia de Privacidade**: Senhas, tokens de autenticação (Bearer tokens), grants HMAC e caminhos absolutos do sistema de arquivos são estritamente sanitizados/redigidos (`[REDACTED]`, `[REDACTED_PATH]`).
+- **Controle de Acesso Zero-Trust**: O download de blobs é estritamente limitado aos membros de salas cujo manifesto ativo referencia o hash do blob (`403 BLOB_NOT_IN_ROOM`). Grants de download e upload são assinados com HMAC-SHA256 e vinculados ao ID específico da sala (`{op}:{room_id}:{hash}:{expires}`), impedindo reutilização cross-room.
+
 ### WebSocket de Presença e Sincronização
 
 - Rota: `ws://177.153.59.168:3000/v1/rooms/<room_id>/ws?token=<token>` (ou via header `Authorization: Bearer <token>`)
@@ -268,11 +355,24 @@ As migrações em `migrations/` são executadas automaticamente na inicializaç�
   - `content_hash VARCHAR(64) PRIMARY KEY` (SHA-256)
   - `size_bytes BIGINT`
   - `format VARCHAR(32)` (.fantome ou .modpkg)
-  - `storage_path TEXT NULL` (preparado para a integração S3 da Etapa 15)
+  - `storage_path TEXT NULL` (Caminho no volume persistente do CAS ou chave S3)
+  - `uploaded_by_room_id VARCHAR(64) NULL REFERENCES rooms(room_id)`
+  - `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+  - `last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+- **`room_audit_logs`**:
+  - `id BIGSERIAL PRIMARY KEY`
+  - `room_id VARCHAR(64) REFERENCES rooms(room_id) ON DELETE CASCADE`
+  - `actor_member_id VARCHAR(64) NOT NULL`
+  - `actor_role VARCHAR(32) NOT NULL`
+  - `action VARCHAR(64) NOT NULL`
+  - `details JSONB NULL` (sanitizado, sem senhas/tokens/caminhos)
+  - `client_ip VARCHAR(45) NULL`
+  - `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
 
 ---
 
 ## 7. Política de Expiração e Tarefas em Segundo Plano
 
 - **Expiração de Salas**: Salas expiram após 24 horas de inatividade. Qualquer atividade (entrada de membro, publicação de manifesto, ack de revisão ou heartbeat) renova `expires_at = NOW() + INTERVAL '24 hours'`.
-- **Limpeza Automática**: Um worker Tokio roda a cada 5 minutos no servidor (`DELETE FROM rooms WHERE expires_at < NOW()`), removendo salas expiradas e seus membros/manifestos associados em cascata.
+- **Limpeza Automática de Salas**: Um worker Tokio roda a cada 5 minutos no servidor (`DELETE FROM rooms WHERE expires_at < NOW()`), removendo salas expiradas e seus membros/manifestos associados em cascata.
+- **Limpeza Automática de Blobs Órfãos**: Um worker Tokio roda a cada 1 hora no servidor, identificando blobs que não estão associados a nenhum manifesto ativo de sala há mais de 48 horas. Os arquivos em disco e os registros em `room_blobs` são removidos para liberar espaço em disco.
