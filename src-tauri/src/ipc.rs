@@ -52,6 +52,10 @@ migrated![
     switch_league_install,
     // Room synchronization: this isolated command set has no patcher, launcher, settings, or
     // active-profile commands, so manifests and room cache state cannot cross into those surfaces.
+    create_remote_room,
+    join_remote_room,
+    get_remote_room_members,
+    sync_remote_room,
     create_room_draft,
     join_room_draft,
     list_room_memberships,
@@ -65,6 +69,8 @@ migrated![
     prune_room_cache,
     prepare_room_revision,
     create_room_profile,
+    publish_room_profile,
+    sync_and_apply_room,
 ];
 
 /// The builder the bindings are generated from and the handler is built out of.

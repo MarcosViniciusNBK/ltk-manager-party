@@ -1,4 +1,4 @@
-import { WarningIcon } from "@phosphor-icons/react";
+import { CheckCircleIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 
 import { AlertBox } from "@/components";
@@ -33,9 +33,9 @@ export function RoomWorkspace() {
       </div>
 
       <AlertBox
-        variant="info"
+        variant="success"
         title={m.rooms_service_pending_title()}
-        icon={<WarningIcon className="h-5 w-5" />}
+        icon={<CheckCircleIcon className="h-5 w-5 text-emerald-400" />}
       >
         {m.rooms_service_pending_description()}
       </AlertBox>

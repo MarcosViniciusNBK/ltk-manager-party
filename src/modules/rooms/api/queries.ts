@@ -2,6 +2,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 
 import type {
   JoinedRoom,
+  RemoteMemberInfo,
   RoomCacheStatus,
   RoomLocalStatus,
   RoomManifest,
@@ -41,6 +42,14 @@ export const roomQueries = {
       enabled: roomId.length > 0,
     }),
 
+  remoteMembers: (roomId: string) =>
+    queryOptions<RemoteMemberInfo[]>({
+      queryKey: roomKeys.members(roomId),
+      queryFn: queryFnWithArgs(api.rooms.getRemoteMembers, roomId),
+      enabled: roomId.length > 0,
+      refetchInterval: 5000,
+    }),
+
   cache: () =>
     queryOptions<RoomCacheStatus>({
       queryKey: roomKeys.cache(),
@@ -62,6 +71,10 @@ export function useRoomManifest(roomId: string) {
 
 export function useRoomLocalStatus(roomId: string) {
   return useQuery(roomQueries.localStatus(roomId));
+}
+
+export function useRemoteRoomMembers(roomId: string) {
+  return useQuery(roomQueries.remoteMembers(roomId));
 }
 
 export function useRoomCacheStatus() {

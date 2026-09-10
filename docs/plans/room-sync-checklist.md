@@ -121,16 +121,30 @@ by the user.
       `member_acknowledged`), 24-hour inactivity room expiration with automatic background pruning,
       and migration 000003. Tested live on VPS at `http://177.153.59.168:3000`.
 
-15. [ ] Integrate content-addressed object storage.
+15. [x] Integrate content-addressed object storage.
     - S3-compatible storage with short-lived signed upload/download URLs.
     - Upload only missing hashes; download through HTTPS rather than WebSocket.
     - Quotas, retention, orphan cleanup, and optional CDN delivery.
+    - Implemented with persistent Content-Addressed Storage (`/data/blobs/objects` and `partial`),
+      HMAC-SHA256 signed grants for upload (30m) and download (60m), `POST /v1/rooms/:id/blobs/check`
+      for uploading only missing hashes, resumable upload protocol conforming to `transfer.rs`
+      (`HEAD` with `Upload-Offset`, `PUT` with `Content-Range` and `X-Content-SHA256` completion receipt),
+      resumable download with HTTP `Range` (`206 Partial Content`), 5 GB quota per room, automated
+      orphan cleanup background worker, and migration 000004. Tested live on VPS at `http://177.153.59.168:3000`.
 
-16. [ ] Enforce server and client authorization.
+16. [x] Enforce server and client authorization.
     - A member can access only blobs referenced by a room they have joined.
     - Prevent arbitrary remote URLs, SSRF, path injection, cross-room blob enumeration, and replay of
       expired upload grants.
     - Audit owner actions without logging passwords, tokens, or local filesystem paths.
+    - Implemented with Zero-Trust download authorization (`request_download_url` validates content hash is
+      referenced in the room's published manifests, returning `403 BLOB_NOT_IN_ROOM`), room-scoped HMAC-SHA256
+      grants (`{op}:{room_id}:{hash}:{expires}`) preventing cross-room grant reuse, path traversal rejection
+      (`is_safe_hash` + directory containment check returning `400 Bad Request`), client domain isolation
+      (room sync manifests strictly isolated to room-scoped staging and cannot modify active profile, patcher,
+      or launcher), privacy-preserving audit logging (`room_audit_logs` table via migration 000005, structured
+      `record_audit_event` and `sanitize_value` redacting passwords, tokens, and filesystem paths, queryable via
+      `GET /v1/rooms/:id/audit`). Fully verified with live VPS tests at `http://177.153.59.168:3000`.
 
 17. [ ] Harden untrusted file handling.
     - Allow only supported archive formats and reject empty, oversized, malformed, or ambiguous

@@ -3,44 +3,53 @@ import { useState } from "react";
 
 import { Button, FormField, SectionCard, useToast } from "@/components";
 import { errorMessage, m } from "@/i18n";
+import type { JoinedRoom } from "@/lib/bindings.gen";
 
-import { useCreateRoomDraft, useOpenRoomDraft } from "../api";
+import { useCreateRemoteRoom, useJoinRemoteRoom } from "../api";
 
 export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void }) {
   const [roomCode, setRoomCode] = useState("");
+  const [password, setPassword] = useState("");
   const toast = useToast();
-  const createDraft = useCreateRoomDraft();
-  const openDraft = useOpenRoomDraft();
-  const busy = createDraft.isPending || openDraft.isPending;
+  const createRemote = useCreateRemoteRoom();
+  const joinRemote = useJoinRemoteRoom();
+  const busy = createRemote.isPending || joinRemote.isPending;
 
-  function requestedRoomCode(): string | null {
-    const value = roomCode.trim();
-    if (value) return value;
-    toast.warning(m.rooms_code_required());
-    return null;
+  function requestedCredentials(): { roomId: string; password: string } | null {
+    const roomId = roomCode.trim();
+    if (!roomId) {
+      toast.warning(m.rooms_code_required());
+      return null;
+    }
+    const pwd = password.trim();
+    if (!pwd) {
+      toast.warning(m.rooms_password_required());
+      return null;
+    }
+    return { roomId, password: pwd };
   }
 
   function create() {
-    const roomId = requestedRoomCode();
-    if (!roomId) return;
-    createDraft.mutate(roomId, {
-      onSuccess: (room) => {
+    const creds = requestedCredentials();
+    if (!creds) return;
+    createRemote.mutate(creds, {
+      onSuccess: (room: JoinedRoom) => {
         onOpened(room.roomId);
         toast.success(m.rooms_created_title(), m.rooms_draft_ready_description());
       },
-      onError: (error) => toast.error(m.rooms_open_failed_title(), errorMessage(error)),
+      onError: (error: unknown) => toast.error(m.rooms_open_failed_title(), errorMessage(error)),
     });
   }
 
-  function open() {
-    const roomId = requestedRoomCode();
-    if (!roomId) return;
-    openDraft.mutate(roomId, {
-      onSuccess: (room) => {
+  function join() {
+    const creds = requestedCredentials();
+    if (!creds) return;
+    joinRemote.mutate(creds, {
+      onSuccess: (room: JoinedRoom) => {
         onOpened(room.roomId);
         toast.success(m.rooms_opened_title(), m.rooms_draft_ready_description());
       },
-      onError: (error) => toast.error(m.rooms_open_failed_title(), errorMessage(error)),
+      onError: (error: unknown) => toast.error(m.rooms_open_failed_title(), errorMessage(error)),
     });
   }
 
@@ -64,7 +73,9 @@ export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void
           description={m.rooms_password_description()}
           placeholder={m.rooms_password_placeholder()}
           type="password"
-          disabled
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          autoComplete="current-password"
         />
       </div>
       <div className="flex flex-wrap gap-2">
@@ -72,7 +83,7 @@ export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void
           variant="filled"
           left={<PlusCircleIcon weight="bold" />}
           onClick={create}
-          loading={createDraft.isPending}
+          loading={createRemote.isPending}
           disabled={busy}
         >
           {m.rooms_create_draft_action()}
@@ -80,8 +91,8 @@ export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void
         <Button
           variant="outline"
           left={<FolderSimpleIcon weight="bold" />}
-          onClick={open}
-          loading={openDraft.isPending}
+          onClick={join}
+          loading={joinRemote.isPending}
           disabled={busy}
         >
           {m.rooms_open_draft_action()}

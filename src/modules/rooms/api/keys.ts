@@ -5,5 +5,6 @@ export const roomKeys = {
   snapshot: (roomId: string) => [...roomKeys.all, "snapshot", roomId] as const,
   manifest: (roomId: string) => [...roomKeys.all, "manifest", roomId] as const,
   localStatus: (roomId: string) => [...roomKeys.all, "local-status", roomId] as const,
+  members: (roomId: string) => [...roomKeys.all, "members", roomId] as const,
   cache: () => [...roomKeys.all, "cache"] as const,
 };

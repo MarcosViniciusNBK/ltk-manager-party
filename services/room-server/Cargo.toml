@@ -29,6 +29,8 @@ futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 argon2 = { version = "0.5", features = ["std"] }
 rand = "0.8"
+

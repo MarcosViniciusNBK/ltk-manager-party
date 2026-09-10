@@ -6,14 +6,14 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	/**
 	 *  Hold `asset` open as a bin, answering the header and the rows at depth zero.
-	 *
+	 * 
 	 *  With no `entry`, the rows are one per object. With one, `0x` and eight hex digits,
 	 *  the rows are that object's properties and the answer carries its header facts.
 	 */
 	binOpen: (asset: AssetRef, entry: string | null) => __TAURI_INVOKE<({ ok: true; value: BinDocumentHandle }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("bin_open", { asset, entry }),
 	/**
 	 *  The rows under one node of an open document, `offset` in and at most `limit` of them.
-	 *
+	 * 
 	 *  `entry` is the object's hash as `0x` and eight hex digits. `path` is the wire form
 	 *  of the property path, empty for the object itself. Every row carries what the meta
 	 *  schema declares for its field at the install's build.
@@ -113,6 +113,14 @@ export const commands = {
 	 *  next start.
 	 */
 	switchLeagueInstall: (installRoot: string) => __TAURI_INVOKE<({ ok: true; value: null }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("switch_league_install", { installRoot }),
+	/**  Create a new online room on the authoritative room server. */
+	createRemoteRoom: (roomId: string, password: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("create_remote_room", { roomId, password }),
+	/**  Join an existing online room on the authoritative room server. */
+	joinRemoteRoom: (roomId: string, password: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("join_remote_room", { roomId, password }),
+	/**  Retrieve active members and synchronization state from the server. */
+	getRemoteRoomMembers: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RemoteMemberInfo[] }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_remote_room_members", { roomId }),
+	/**  Synchronize manifest and missing blobs from the authoritative server. */
+	syncRemoteRoom: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("sync_remote_room", { roomId }),
 	/**
 	 *  Create local draft state for a room code. This intentionally does not create a remote room;
 	 *  server-side creation, password handling, and owner tokens arrive with the authoritative service.
@@ -134,7 +142,7 @@ export const commands = {
 	getRoomSyncSnapshot: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_room_sync_snapshot", { roomId }),
 	/**
 	 *  Submit one manifest from the isolated room transport.
-	 *
+	 * 
 	 *  It stages, verifies, and atomically accepts only already-cached blobs. Missing blobs remain a
 	 *  pending room transfer; no mod is installed, enabled, applied, or launched.
 	 */
@@ -171,7 +179,7 @@ export const commands = {
 /* Types */
 /**
  *  What went wrong, as the fields the frontend translates over.
- *
+ * 
  *  The frontend owns every sentence a user reads (ADR-0017), so no variant
  *  carries one. A `detail` is prose from outside the app, such as an OS or
  *  crate error, which the frontend draws as data under a title of its own.
@@ -254,7 +262,7 @@ export type AppErrorResponse =
  *  Something GitHub publishes could not be read. The kind says which
  *  remedy applies, and the feed says what was being read.
  */
-{ code: "GITHUB"; feed: GitHubFeed; kind: GitHubErrorKind; detail: string } |
+{ code: "GITHUB"; feed: GitHubFeed; kind: GitHubErrorKind; detail: string } | 
 /**
  *  A room synchronization operation failed. Raw room errors can contain local paths, so only
  *  this stable category reaches the webview.
@@ -263,7 +271,7 @@ export type AppErrorResponse =
 
 /**
  *  Where a previewed asset's bytes come from.
- *
+ * 
  *  A reference crosses IPC from the webview, so every path in one is untrusted.
  *  [`read`](Self::read) checks a relative path against the root it belongs to
  *  rather than joining it on, and [`File`](Self::File) is the one variant that
@@ -1048,6 +1056,16 @@ export type PatcherError =
  */
 export type PropertyKind = "none" | "bool" | "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" | "f32" | "vec2" | "vec3" | "vec4" | "mtx44" | "rgba" | "string" | "hash" | "file" | "list" | "list2" | "pointer" | "embed" | "link" | "option" | "map" | "flag";
 
+/**  Remote member presence information from the room server. */
+export type RemoteMemberInfo = {
+	memberId: string,
+	role: string,
+	lastAcknowledgedRevision: number,
+	ackStatus: string,
+	isOnline: boolean,
+	isStale: boolean,
+};
+
 /**  Cache facts suitable for IPC. File paths and room credentials never cross this boundary. */
 export type RoomCacheStatus = {
 	joinedRooms: number,
@@ -1057,7 +1075,7 @@ export type RoomCacheStatus = {
 
 /**
  *  Durable local workflow facts suitable for the room UI.
- *
+ * 
  *  It contains no cache paths, credentials, local-mod mappings, or game state. A profile binding
  *  only identifies the profile the user may choose through the existing profile flow.
  */
@@ -1383,3 +1401,4 @@ export type Verdict_Serialize = {
 export type WorkshopError = 
 /**  One or more files already exist in the target layer directory. */
 { kind: "LAYER_FILE_CONFLICT"; conflicts: string[] };
+

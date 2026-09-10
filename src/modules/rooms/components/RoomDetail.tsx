@@ -12,6 +12,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { Button, Code, EmptyState, Progress, SectionCard, useToast } from "@/components";
 import { errorMessage, m } from "@/i18n";
+import type { RemoteMemberInfo } from "@/lib/bindings.gen";
 import { useActiveProfile } from "@/modules/library";
 import { formatBytes } from "@/utils";
 
@@ -19,10 +20,12 @@ import {
   useCreateRoomProfile,
   useLeaveRoom,
   usePrepareRoomRevision,
+  useRemoteRoomMembers,
   useRoomLocalStatus,
   useRoomManifest,
   useRoomMemberships,
   useRoomSnapshot,
+  useSyncRemoteRoom,
 } from "../api";
 import { getRoomWorkflowStatus } from "../status";
 import { WorkflowStep } from "./WorkflowStep";
@@ -66,6 +69,8 @@ export function RoomDetail({ roomId }: { roomId: string }) {
   const leaveRoom = useLeaveRoom();
   const prepareRevision = usePrepareRoomRevision();
   const createRoomProfile = useCreateRoomProfile();
+  const syncRemote = useSyncRemoteRoom();
+  const { data: remoteMembers = [] } = useRemoteRoomMembers(roomId);
   const membership = rooms.find((room) => room.roomId === roomId);
   const workflow = getRoomWorkflowStatus({
     phase: snapshot?.phase,
@@ -152,6 +157,27 @@ export function RoomDetail({ roomId }: { roomId: string }) {
           title={m.rooms_sync_title()}
           description={m.rooms_sync_description()}
           icon={<CloudArrowDownIcon className="h-4 w-4" />}
+          action={
+            <Button
+              variant="ghost"
+              size="sm"
+              left={<CloudArrowDownIcon weight="bold" />}
+              loading={syncRemote.isPending}
+              onClick={() => {
+                syncRemote.mutate(roomId, {
+                  onSuccess: () =>
+                    toast.success(
+                      m.rooms_sync_done_title(),
+                      m.rooms_sync_done_description(),
+                    ),
+                  onError: (error: unknown) =>
+                    toast.error(m.rooms_sync_failed_title(), errorMessage(error)),
+                });
+              }}
+            >
+              {m.rooms_sync_action()}
+            </Button>
+          }
         >
           <div className="flex items-center gap-2 text-sm text-surface-200">
             <span
@@ -183,16 +209,59 @@ export function RoomDetail({ roomId }: { roomId: string }) {
           description={m.rooms_members_description()}
           icon={<UsersThreeIcon className="h-4 w-4" />}
         >
-          {membership && (
-            <div className="flex items-center gap-3 rounded-lg border border-surface-700/60 bg-surface-800/35 p-3">
-              <CheckCircleIcon weight="fill" className="h-5 w-5 text-surface-400" />
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-surface-100">{m.rooms_member_you()}</p>
-                <p className="truncate text-xs text-surface-400">{m.rooms_member_local_draft()}</p>
-              </div>
+          {remoteMembers.length > 0 ? (
+            <div className="space-y-2">
+              {remoteMembers.map((member: RemoteMemberInfo) => {
+                const isYou = membership?.memberId === member.memberId;
+                return (
+                  <div
+                    key={member.memberId}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-surface-700/60 bg-surface-800/35 p-3"
+                  >
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <span
+                        className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                          member.isOnline ? "bg-emerald-400" : "bg-surface-500"
+                        }`}
+                        title={member.isOnline ? m.rooms_member_online() : m.rooms_member_offline()}
+                      />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <p className="truncate font-mono text-xs font-medium text-surface-100">
+                            {member.memberId.slice(0, 12)}
+                          </p>
+                          {isYou && (
+                            <span className="rounded bg-primary-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary-300">
+                              {m.rooms_member_you()}
+                            </span>
+                          )}
+                          <span className="rounded bg-surface-700 px-1.5 py-0.5 text-[10px] uppercase text-surface-300">
+                            {member.role}
+                          </span>
+                        </div>
+                        <p className="truncate text-xs text-surface-400">
+                          rev {member.lastAcknowledgedRevision} • {member.ackStatus}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+          ) : (
+            <>
+              {membership && (
+                <div className="flex items-center gap-3 rounded-lg border border-surface-700/60 bg-surface-800/35 p-3">
+                  <CheckCircleIcon weight="fill" className="h-5 w-5 text-surface-400" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-surface-100">{m.rooms_member_you()}</p>
+                    <p className="truncate text-xs text-surface-400">{m.rooms_member_local_draft()}</p>
+                  </div>
+                </div>
+              )}
+              <p className="text-sm text-surface-400">{m.rooms_member_remote_pending()}</p>
+            </>
           )}
-          <p className="text-sm text-surface-400">{m.rooms_member_remote_pending()}</p>
         </SectionCard>
       </div>
 

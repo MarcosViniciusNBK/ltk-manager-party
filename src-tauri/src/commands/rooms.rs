@@ -7,7 +7,7 @@
 
 use crate::error::{AppErrorResponse, IpcResult, RoomSyncErrorKind};
 use crate::mods::ModLibraryState;
-use crate::rooms::{RoomCacheStatus, RoomLocalStatus, RoomRuntimeError, RoomSyncState};
+use crate::rooms::{RemoteMemberInfo, RoomCacheStatus, RoomLocalStatus, RoomRuntimeError, RoomSyncState};
 use crate::state::SettingsState;
 use ltk_manager_core::room_sync::{
     CachePruneReport, JoinedRoom, RoomManifest, RoomPreparationResult, RoomProfileWorkflowResult,
@@ -56,6 +56,52 @@ impl From<RoomProfileWorkflowResult> for RoomProfileSummary {
             profile_id: value.profile.id,
         }
     }
+}
+
+/// Create a new online room on the authoritative room server.
+#[tauri::command]
+#[specta::specta]
+pub async fn create_remote_room(
+    room_id: String,
+    password: String,
+    app_handle: AppHandle,
+) -> IpcResult<JoinedRoom> {
+    let rooms = rooms(&app_handle);
+    room_task(move || rooms.create_remote_room(&room_id, &password)).await
+}
+
+/// Join an existing online room on the authoritative room server.
+#[tauri::command]
+#[specta::specta]
+pub async fn join_remote_room(
+    room_id: String,
+    password: String,
+    app_handle: AppHandle,
+) -> IpcResult<JoinedRoom> {
+    let rooms = rooms(&app_handle);
+    room_task(move || rooms.join_remote_room(&room_id, &password)).await
+}
+
+/// Retrieve active members and synchronization state from the server.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_remote_room_members(
+    room_id: String,
+    app_handle: AppHandle,
+) -> IpcResult<Vec<RemoteMemberInfo>> {
+    let rooms = rooms(&app_handle);
+    room_task(move || rooms.remote_room_members(&room_id)).await
+}
+
+/// Synchronize manifest and missing blobs from the authoritative server.
+#[tauri::command]
+#[specta::specta]
+pub async fn sync_remote_room(
+    room_id: String,
+    app_handle: AppHandle,
+) -> IpcResult<RoomSyncSnapshot> {
+    let rooms = rooms(&app_handle);
+    room_task(move || rooms.sync_remote_room(&room_id)).await
 }
 
 /// Create local draft state for a room code. This intentionally does not create a remote room;
@@ -208,6 +254,49 @@ pub async fn create_room_profile(
     .await
 }
 
+/// Publish a local profile to the remote room as owner.
+#[tauri::command]
+#[specta::specta]
+pub async fn publish_room_profile(
+    room_id: String,
+    profile_id: Option<String>,
+    app_handle: AppHandle,
+) -> IpcResult<RoomSyncSnapshot> {
+    let rooms = rooms(&app_handle);
+    let library = app_handle.state::<ModLibraryState>().0.clone();
+    let config = app_handle.state::<SettingsState>().config();
+    room_task(move || {
+        rooms.publish_profile_to_remote_room(
+            &room_id,
+            profile_id.as_deref(),
+            &library,
+            &config,
+        )
+    })
+    .await
+}
+
+/// One-click sync, prepare, and apply room profile.
+#[tauri::command]
+#[specta::specta]
+pub async fn sync_and_apply_room(
+    room_id: String,
+    app_handle: AppHandle,
+) -> IpcResult<RoomProfileSummary> {
+    let rooms = rooms(&app_handle);
+    let library = app_handle.state::<ModLibraryState>().0.clone();
+    let config = app_handle.state::<SettingsState>().config();
+    room_task(move || {
+        let profile = rooms.sync_and_apply_room(&room_id, &library, &config)?;
+        Ok::<RoomProfileSummary, RoomRuntimeError>(RoomProfileSummary {
+            room_id: room_id.clone(),
+            revision: 0,
+            profile_id: profile.id,
+        })
+    })
+    .await
+}
+
 fn rooms(app_handle: &AppHandle) -> RoomSyncState {
     app_handle.state::<RoomSyncState>().inner().clone()
 }
@@ -245,6 +334,9 @@ impl From<RoomCommandError> for AppErrorResponse {
             }
             RoomCommandError::Runtime(RoomRuntimeError::Profile(_)) => RoomSyncErrorKind::Profile,
             RoomCommandError::Runtime(RoomRuntimeError::Io(_)) => RoomSyncErrorKind::State,
+            RoomCommandError::Runtime(RoomRuntimeError::Network(_)) => {
+                RoomSyncErrorKind::Synchronization
+            }
             RoomCommandError::Interrupted => RoomSyncErrorKind::Interrupted,
         };
         // Some lower-level room errors name local paths. The log is application-local; the IPC

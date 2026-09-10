@@ -258,7 +258,6 @@ curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/blobs/upload_url \
 ### Protocolo de Upload Resumável (transfer.rs)
 
 1. **Probe com `HEAD`**:
-
    ```bash
    curl -I "http://177.153.59.168:3000/v1/blobs/upload/<hash>?grant=<grant>&expires=<ts>"
    # Cabeçalhos retornados:
@@ -303,7 +302,6 @@ curl -H "Range: bytes=1024-" "http://177.153.59.168:3000/v1/blobs/download/<hash
 curl http://177.153.59.168:3000/v1/rooms/<room_id>/audit \
   -H "Authorization: Bearer <token>"
 ```
-
 - Retorna eventos de segurança auditados (`room_created`, `member_joined`, `manifest_published`, `revision_acknowledged`, `owner_transferred`, `upload_url_requested`, `download_url_requested`, `blob_uploaded`).
 - **Garantia de Privacidade**: Senhas, tokens de autenticação (Bearer tokens), grants HMAC e caminhos absolutos do sistema de arquivos são estritamente sanitizados/redigidos (`[REDACTED]`, `[REDACTED_PATH]`).
 - **Controle de Acesso Zero-Trust**: O download de blobs é estritamente limitado aos membros de salas cujo manifesto ativo referencia o hash do blob (`403 BLOB_NOT_IN_ROOM`). Grants de download e upload são assinados com HMAC-SHA256 e vinculados ao ID específico da sala (`{op}:{room_id}:{hash}:{expires}`), impedindo reutilização cross-room.
@@ -376,3 +374,4 @@ As migrações em `migrations/` são executadas automaticamente na inicializaç�
 - **Expiração de Salas**: Salas expiram após 24 horas de inatividade. Qualquer atividade (entrada de membro, publicação de manifesto, ack de revisão ou heartbeat) renova `expires_at = NOW() + INTERVAL '24 hours'`.
 - **Limpeza Automática de Salas**: Um worker Tokio roda a cada 5 minutos no servidor (`DELETE FROM rooms WHERE expires_at < NOW()`), removendo salas expiradas e seus membros/manifestos associados em cascata.
 - **Limpeza Automática de Blobs Órfãos**: Um worker Tokio roda a cada 1 hora no servidor, identificando blobs que não estão associados a nenhum manifesto ativo de sala há mais de 48 horas. Os arquivos em disco e os registros em `room_blobs` são removidos para liberar espaço em disco.
+

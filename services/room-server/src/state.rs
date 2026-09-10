@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 use crate::rate_limit::RateLimiter;
+use crate::storage::StorageManager;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -13,6 +14,7 @@ pub struct AppState {
     pub rooms: Arc<RwLock<HashMap<String, broadcast::Sender<RoomEvent>>>>,
     pub active_connections: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub rate_limiter: RateLimiter,
+    pub storage: StorageManager,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -23,12 +25,13 @@ pub struct RoomEvent {
 }
 
 impl AppState {
-    pub fn new(db: PgPool) -> Self {
+    pub fn new(db: PgPool, storage: StorageManager) -> Self {
         Self {
             db,
             rooms: Arc::new(RwLock::new(HashMap::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: RateLimiter::default(),
+            storage,
         }
     }
 

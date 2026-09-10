@@ -17,12 +17,36 @@ function invalidateRoom(client: QueryClient, roomId: string) {
     client.invalidateQueries({ queryKey: roomKeys.snapshot(roomId) }),
     client.invalidateQueries({ queryKey: roomKeys.manifest(roomId) }),
     client.invalidateQueries({ queryKey: roomKeys.localStatus(roomId) }),
+    client.invalidateQueries({ queryKey: roomKeys.members(roomId) }),
     client.invalidateQueries({ queryKey: roomKeys.cache() }),
   ]);
 }
 
-/** Explicit local actions. None select a profile, apply mods, or start the game. */
 export const roomMutations = {
+  createRemote: (client: QueryClient) =>
+    mutationOptions<JoinedRoom, unknown, { roomId: string; password: string }>({
+      mutationFn: mutationFn<JoinedRoom, unknown, { roomId: string; password: string }>(
+        ({ roomId, password }) => api.rooms.createRemote(roomId, password),
+      ),
+      onSuccess: (room) => invalidateRoom(client, room.roomId),
+    }),
+
+  joinRemote: (client: QueryClient) =>
+    mutationOptions<JoinedRoom, unknown, { roomId: string; password: string }>({
+      mutationFn: mutationFn<JoinedRoom, unknown, { roomId: string; password: string }>(
+        ({ roomId, password }) => api.rooms.joinRemote(roomId, password),
+      ),
+      onSuccess: (room) => invalidateRoom(client, room.roomId),
+    }),
+
+  syncRemote: (client: QueryClient) =>
+    mutationOptions<unknown, unknown, string>({
+      mutationFn: mutationFn<unknown, unknown, string>((roomId) =>
+        api.rooms.syncRemote(roomId),
+      ),
+      onSuccess: (_res, roomId) => invalidateRoom(client, roomId),
+    }),
+
   createDraft: (client: QueryClient) =>
     mutationOptions<JoinedRoom, unknown, string>({
       mutationFn: mutationFn<JoinedRoom, unknown, string>(api.rooms.createDraft),

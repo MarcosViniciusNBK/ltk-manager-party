@@ -4,6 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::audit::{record_audit_event, AuditLogEntry};
 use crate::auth::{generate_high_entropy_token, hash_password, verify_password};
 use crate::error::ErrorResponse;
 use crate::manifest::RoomManifest;
@@ -209,6 +210,19 @@ pub async fn create_room(
 
     tx.commit().await.map_err(db_error)?;
 
+    record_audit_event(
+        &state.db,
+        &room_id,
+        &owner_member_id,
+        "owner",
+        "room_created",
+        Some(serde_json::json!({
+            "game_build": payload.game_build
+        })),
+        None,
+    )
+    .await;
+
     info!(room_id = %room_id, "Room created successfully with owner role");
 
     Ok((
@@ -320,6 +334,17 @@ pub async fn join_room(
             "role": "member",
         }),
     });
+
+    record_audit_event(
+        &state.db,
+        &room_id,
+        &member_id,
+        "member",
+        "member_joined",
+        None,
+        Some(&client_ip.to_string()),
+    )
+    .await;
 
     info!(room_id = %room_id, member_id = %member_id, "Member authenticated and joined room");
 
@@ -552,6 +577,21 @@ pub async fn publish_manifest(
         }),
     });
 
+    record_audit_event(
+        &state.db,
+        &room_id,
+        "owner",
+        "owner",
+        "manifest_published",
+        Some(serde_json::json!({
+            "revision": new_revision,
+            "mod_count": mod_count,
+            "total_size_bytes": total_size_bytes
+        })),
+        None,
+    )
+    .await;
+
     info!(
         room_id = %room_id,
         revision = new_revision,
@@ -696,6 +736,20 @@ pub async fn ack_revision(
             "status": status,
         }),
     });
+
+    record_audit_event(
+        &state.db,
+        &room_id,
+        &member_id,
+        &_role,
+        "revision_acknowledged",
+        Some(serde_json::json!({
+            "revision": payload.revision,
+            "status": status
+        })),
+        None,
+    )
+    .await;
 
     info!(
         room_id = %room_id,
@@ -876,6 +930,20 @@ pub async fn transfer_ownership(
         }),
     });
 
+    record_audit_event(
+        &state.db,
+        &room_id,
+        &current_owner_id,
+        "owner",
+        "owner_transferred",
+        Some(serde_json::json!({
+            "previous_owner": current_owner_id,
+            "new_owner": payload.new_owner_member_id
+        })),
+        None,
+    )
+    .await;
+
     info!(
         room_id = %room_id,
         previous_owner = %current_owner_id,
@@ -889,6 +957,30 @@ pub async fn transfer_ownership(
         previous_owner: current_owner_id,
         new_owner: payload.new_owner_member_id,
     }))
+}
+
+/// Retrieve privacy-preserving audit logs for a room.
+pub async fn get_audit_logs(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AuditLogEntry>>, (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+    verify_room_authorization(&state, &room_id, &token).await?;
+
+    let logs: Vec<AuditLogEntry> = sqlx::query_as(
+        "SELECT id, room_id, actor_member_id, actor_role, action, details, client_ip, created_at \
+         FROM room_audit_logs \
+         WHERE room_id = $1 \
+         ORDER BY id ASC \
+         LIMIT 200",
+    )
+    .bind(&room_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    Ok(Json(logs))
 }
 
 async fn verify_room_authorization(

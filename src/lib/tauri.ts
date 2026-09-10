@@ -101,6 +101,7 @@ export type {
   RowNode,
 } from "@/lib/bindings.gen";
 export type {
+  RemoteMemberInfo,
   RoomCacheStatus,
   RoomLocalStatus,
   RoomPreparationSummary,
@@ -434,6 +435,14 @@ export const api = {
 
   // Room synchronization, on tauri-specta.
   rooms: {
+    createRemote: (roomId: string, password: string) =>
+      commands.createRemoteRoom(roomId, password).then(toResult),
+    joinRemote: (roomId: string, password: string) =>
+      commands.joinRemoteRoom(roomId, password).then(toResult),
+    getRemoteMembers: (roomId: string) =>
+      commands.getRemoteRoomMembers(roomId).then(toResult),
+    syncRemote: (roomId: string) =>
+      commands.syncRemoteRoom(roomId).then(toResult),
     createDraft: (roomId: string) => commands.createRoomDraft(roomId).then(toResult),
     joinDraft: (roomId: string) => commands.joinRoomDraft(roomId).then(toResult),
     listMemberships: () => commands.listRoomMemberships().then(toResult),

@@ -269,6 +269,81 @@ impl ModLibrary {
             Ok(profile.clone())
         })
     }
+
+    /// Collect the installed archive paths and RoomMod representations for all enabled mods in a profile.
+    pub fn collect_profile_room_artifacts(
+        &self,
+        config: &Config,
+        profile_id: Option<&str>,
+    ) -> AppResult<(Profile, Vec<(std::path::PathBuf, crate::room_sync::RoomMod)>)> {
+        self.with_index(config, |storage_dir, index| {
+            let profile = match profile_id {
+                Some(id) => get_profile_by_id(index, id)?,
+                None => get_active_profile(index)?,
+            };
+
+            let mut artifacts = Vec::new();
+            for mod_id in &profile.enabled_mods {
+                let Some(entry) = index.mods.iter().find(|e| e.id == *mod_id) else {
+                    continue;
+                };
+
+                let archive_path = entry.archive_path(storage_dir);
+                if !archive_path.is_file() {
+                    continue;
+                }
+
+                let room_format = match entry.format {
+                    crate::mods::ModArchiveFormat::Modpkg => crate::room_sync::RoomModFormat::Modpkg,
+                    crate::mods::ModArchiveFormat::Fantome => crate::room_sync::RoomModFormat::Fantome,
+                    _ => continue,
+                };
+
+                let artifact = match crate::room_sync::CanonicalRoomArtifact::from_file(&archive_path, room_format) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::warn!("Skipping mod {} for room export: {:?}", mod_id, e);
+                        continue;
+                    }
+                };
+
+                let installed = crate::mods::archive::metadata::read_installed_mod(entry, false, storage_dir, None);
+                let display_name = installed
+                    .as_ref()
+                    .map(|m| m.display_name.clone())
+                    .unwrap_or_else(|_| entry.id.clone());
+                let version = installed
+                    .as_ref()
+                    .map(|m| m.version.clone())
+                    .unwrap_or_else(|_| "1.0".to_string());
+
+                let suggested_layers = profile
+                    .layer_states
+                    .get(&entry.id)
+                    .map(|layers| {
+                        layers
+                            .iter()
+                            .filter_map(|(name, enabled)| if *enabled { Some(name.clone()) } else { None })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                artifacts.push((
+                    archive_path,
+                    crate::room_sync::RoomMod {
+                        content_hash: artifact.content_hash,
+                        size_bytes: artifact.size_bytes,
+                        format: room_format,
+                        display_name,
+                        version,
+                        suggested_layers,
+                    },
+                ));
+            }
+
+            Ok((profile.clone(), artifacts))
+        })
+    }
 }
 
 fn room_layer_states(

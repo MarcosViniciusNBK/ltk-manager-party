@@ -1,3 +1,4 @@
+mod audit;
 mod auth;
 mod config;
 mod error;
@@ -5,7 +6,9 @@ mod manifest;
 mod rate_limit;
 mod routes;
 mod state;
+mod storage;
 
+use std::path::PathBuf;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -16,6 +19,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use config::ServerConfig;
 use sqlx::postgres::PgPoolOptions;
 use state::AppState;
+use storage::StorageManager;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,6 +59,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     info!("Database migrations applied successfully.");
 
+    // Initialize Content-Addressed Storage
+    let storage_dir = std::env::var("STORAGE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                std::env::temp_dir().join("ltk-storage")
+            } else {
+                PathBuf::from("/data/blobs")
+            }
+        });
+    let storage_secret = std::env::var("STORAGE_SECRET")
+        .map(|s| s.into_bytes())
+        .unwrap_or_else(|_| b"ltk_secure_storage_secret_key_change_in_prod".to_vec());
+    let public_url = std::env::var("PUBLIC_SERVER_URL")
+        .unwrap_or_else(|_| "http://177.153.59.168:3000".to_string());
+
+    info!(path = ?storage_dir, url = %public_url, "Initializing Content-Addressed Storage...");
+    let storage = StorageManager::new(storage_dir, storage_secret, public_url)?;
+
     // Background maintenance worker: prune expired rooms periodically
     let pool_cleanup = pool.clone();
     tokio::spawn(async move {
@@ -76,7 +99,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let state = AppState::new(pool);
+    // Background maintenance worker: prune orphan blobs older than 48 hours
+    let pool_orphan = pool.clone();
+    let storage_orphan = storage.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let orphans: Vec<String> = sqlx::query_scalar(
+                "SELECT rb.content_hash FROM room_blobs rb \
+                 WHERE rb.created_at < NOW() - INTERVAL '48 hours' \
+                 AND NOT EXISTS ( \
+                     SELECT 1 FROM room_manifests rm \
+                     WHERE rm.manifest_json::text LIKE '%' || rb.content_hash || '%' \
+                 ) \
+                 LIMIT 50",
+            )
+            .fetch_all(&pool_orphan)
+            .await
+            .unwrap_or_default();
+
+            for hash in orphans {
+                let path = storage_orphan.blob_path(&hash);
+                let _ = std::fs::remove_file(path);
+                let _ = sqlx::query("DELETE FROM room_blobs WHERE content_hash = $1")
+                    .bind(&hash)
+                    .execute(&pool_orphan)
+                    .await;
+                info!(orphan_hash = %hash, "Reclaimed orphan blob storage");
+            }
+        }
+    });
+
+    let state = AppState::new(pool, storage);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -88,12 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(cors)
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(30),
+            Duration::from_secs(300), // Extended for larger blob uploads
         ));
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(addr = %addr, "Listening for HTTP and WebSocket connections");
+    info!(addr = %addr, "Listening for HTTP, WebSocket, and Blob Transfer connections");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
