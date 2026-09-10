@@ -14,7 +14,7 @@ use crate::mods::analysis::linked_bins::LinkedBinState;
 use crate::mods::analysis::wad_reports::WadReportState;
 use crate::mods::index::{LibraryModEntry, ModArchiveFormat, ModStorage};
 use crate::mods::slug::ModSlug;
-use crate::mods::types::{Profile, ProfileSlug};
+use crate::mods::types::{Profile, ProfileOrderMode, ProfileSlug};
 use chrono::Utc;
 use fs_err as fs;
 use std::collections::HashMap;
@@ -191,6 +191,7 @@ pub(crate) fn make_test_profile(
         mod_order: mod_order.into_iter().map(String::from).collect(),
         enabled_mods: enabled.into_iter().map(String::from).collect(),
         layer_states: HashMap::new(),
+        order_mode: ProfileOrderMode::Library,
         created_at: Utc::now(),
         last_used: Utc::now(),
     }

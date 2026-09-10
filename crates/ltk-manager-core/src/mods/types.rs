@@ -68,10 +68,24 @@ pub struct Profile {
     /// Per-mod layer enabled/disabled states: mod_id → (layer_name → enabled).
     #[serde(default)]
     pub layer_states: HashMap<String, HashMap<String, bool>>,
+    /// Whether the profile follows the library folders or a room revision's exact order.
+    #[serde(default)]
+    pub order_mode: ProfileOrderMode,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last time this profile was used/switched to
     pub last_used: DateTime<Utc>,
+}
+
+/// How a profile's ordering is maintained.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub enum ProfileOrderMode {
+    #[default]
+    Library,
+    RoomPinned,
 }
 
 /// A mod layer shown in the UI.
@@ -247,6 +261,7 @@ mod tests {
                 enabled_mods: Vec::new(),
                 mod_order: Vec::new(),
                 layer_states: HashMap::new(),
+                order_mode: ProfileOrderMode::Library,
                 created_at: Utc::now(),
                 last_used: Utc::now(),
             }],
@@ -274,6 +289,7 @@ mod tests {
                 enabled_mods: Vec::new(),
                 mod_order: Vec::new(),
                 layer_states: HashMap::new(),
+                order_mode: ProfileOrderMode::Library,
                 created_at: Utc::now(),
                 last_used: Utc::now(),
             }],
@@ -301,6 +317,7 @@ mod tests {
                 enabled_mods: Vec::new(),
                 mod_order: Vec::new(),
                 layer_states: HashMap::new(),
+                order_mode: ProfileOrderMode::Library,
                 created_at: Utc::now(),
                 last_used: Utc::now(),
             }],
@@ -337,6 +354,7 @@ mod tests {
             enabled_mods: Vec::new(),
             mod_order: Vec::new(),
             layer_states: HashMap::new(),
+            order_mode: ProfileOrderMode::Library,
             created_at: Utc::now(),
             last_used: Utc::now(),
         });

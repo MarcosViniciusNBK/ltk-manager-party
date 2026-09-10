@@ -13,7 +13,7 @@ use crate::error::{AppError, AppResult};
 use crate::mods::ModLibrary;
 use crate::mods::index::reconcile::reconcile_library_index;
 use crate::mods::slug::ModSlug;
-use crate::mods::types::{LibraryFolder, Profile, ProfileSlug, ROOT_FOLDER_ID};
+use crate::mods::types::{LibraryFolder, Profile, ProfileOrderMode, ProfileSlug, ROOT_FOLDER_ID};
 use crate::utils::fs::atomic_write;
 use chrono::{DateTime, Utc};
 use fs_err as fs;
@@ -158,6 +158,7 @@ impl Default for LibraryIndex {
             enabled_mods: Vec::new(),
             mod_order: Vec::new(),
             layer_states: HashMap::new(),
+            order_mode: ProfileOrderMode::Library,
             created_at: Utc::now(),
             last_used: Utc::now(),
         };

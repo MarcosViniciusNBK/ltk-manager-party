@@ -188,6 +188,7 @@ function RootLayout() {
   useHotkeys("ctrl+1", () => navigate({ to: "/" }), { preventDefault: true });
   useHotkeys("ctrl+2", () => navigate({ to: "/mods" }), { preventDefault: true });
   useHotkeys("ctrl+3", () => navigate({ to: "/workshop" }), { preventDefault: true });
+  useHotkeys("ctrl+4", () => navigate({ to: "/rooms" }), { preventDefault: true });
   useHotkeys("ctrl+d", () => navigate({ to: "/diagnostics", search: { tab: "games" } }), {
     preventDefault: true,
   });

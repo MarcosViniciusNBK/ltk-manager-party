@@ -30,6 +30,8 @@
   "error.PREVIEW.title": "Preview failed",
   "error.PROJECT_ALREADY_EXISTS.title": "Project already exists: {projectName}",
   "error.PROJECT_NOT_FOUND.title": "Project not found: {projectName}",
+  "error.ROOM_SYNC.description": "Check that the room is available and try synchronizing again.",
+  "error.ROOM_SYNC.title": "Room synchronization failed",
   "error.SCHEMA_VERSION_TOO_NEW.description": "Your mod library was created by a newer version of the app (schema v{fileVersion}). This version only supports up to v{maxSupported}.",
   "error.SCHEMA_VERSION_TOO_NEW.title": "Mod library requires a newer version",
   "error.SERIALIZATION.title": "JSON error",

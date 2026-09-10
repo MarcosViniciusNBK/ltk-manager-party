@@ -75,6 +75,13 @@ describe("describeError", () => {
       describePatcherError({ kind: "BUSY" }),
     );
   });
+
+  it("keeps room synchronization errors generic", () => {
+    expect(describeError({ code: "ROOM_SYNC", kind: "SYNCHRONIZATION" })).toEqual({
+      title: m["error.ROOM_SYNC.title"](),
+      description: m["error.ROOM_SYNC.description"](),
+    });
+  });
 });
 
 describe("describeLaunchError", () => {

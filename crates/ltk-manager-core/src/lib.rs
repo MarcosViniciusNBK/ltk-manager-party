@@ -24,6 +24,7 @@ pub mod patcher;
 pub mod preview;
 pub mod problems;
 pub mod ritobin;
+pub mod room_sync;
 pub mod storage;
 pub mod strings;
 pub mod utils;

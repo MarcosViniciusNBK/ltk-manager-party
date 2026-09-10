@@ -51,7 +51,10 @@ pub use health::timing::{HealthTiming, ModTiming};
 pub use health::{HealthCheckBasis, HealthCheckReadiness, ModHealth, ModHealthVerdict};
 pub use index::document::{ModArchiveFormat, ModStorage};
 pub use index::layout_migration::{FailedConversion, LayoutMigrationReport, LayoutMigrationState};
-pub use types::{BulkInstallResult, EditModMetadataArgs, InstalledMod, LibraryFolder, Profile};
+pub(crate) use organize::profiles::RoomProfileModSpec;
+pub use types::{
+    BulkInstallResult, EditModMetadataArgs, InstalledMod, LibraryFolder, Profile, ProfileOrderMode,
+};
 
 use crate::config::Config;
 use crate::events::EventSink;

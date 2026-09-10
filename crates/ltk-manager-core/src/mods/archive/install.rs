@@ -23,6 +23,9 @@ use crate::mods::types::{BulkInstallError, BulkInstallResult, InstalledMod, ROOT
 use chrono::{DateTime, Utc};
 use fs_err as fs;
 use ltk_wad::PathResolver;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -33,6 +36,7 @@ use uuid::Uuid;
 /// looking for mod projects to re-register, and it is what the startup sweep
 /// matches on.
 pub(crate) const STAGING_PREFIX: &str = ".staging-";
+const ROOM_SOURCE_HASH_FILE: &str = ".room-source-sha256";
 
 /// What an install needs that the index does not hold.
 pub(crate) struct InstallContext<'a> {
@@ -189,6 +193,86 @@ impl ModLibrary {
         Ok(BulkInstallResult { installed, failed })
     }
 
+    /// Prepare one verified room-cache archive in the library without enabling it anywhere.
+    ///
+    /// The content hash is stored beside the imported metadata so a retry (including one after a
+    /// crash between the library and room-state writes) reuses the local UUID instead of creating a
+    /// duplicate. The caller remains responsible for verifying the cache blob before this method.
+    pub(crate) fn prepare_cached_room_mod(
+        &self,
+        config: &Config,
+        source_path: &Path,
+        format: ModArchiveFormat,
+        content_hash: &str,
+    ) -> AppResult<PreparedCachedMod> {
+        if let Some(local_mod_id) = self.with_index(config, |storage_dir, index| {
+            Ok(find_room_source(index, storage_dir, format, content_hash))
+        })? {
+            return Ok(PreparedCachedMod {
+                local_mod_id,
+                imported: false,
+            });
+        }
+
+        let storage_dir = self.storage_dir(config)?;
+        let resolver = self.wad_resolver();
+        let staged = stage_mod_package_as(
+            &storage_dir,
+            source_path,
+            format,
+            &InstallContext {
+                resolver: resolver.as_ref(),
+            },
+        )?;
+        let marker_result = (|| -> AppResult<()> {
+            let marker = RoomSourceMarker {
+                schema_version: 1,
+                source_sha256: content_hash.to_string(),
+                library_sha256: sha256_file(&staged.staged_archive)?,
+                format,
+            };
+            fs::write(
+                staged.staging_dir.join(ROOM_SOURCE_HASH_FILE),
+                serde_json::to_vec(&marker)?,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = marker_result {
+            staged.discard();
+            return Err(error);
+        }
+
+        let mut staged = Some(staged);
+        let result = self.mutate_index(config, |storage_dir, index| {
+            // Staging deliberately happens outside the index lock. Check again under the lock so
+            // two simultaneous explicit preparation requests cannot install the same hash twice.
+            if let Some(local_mod_id) = find_room_source(index, storage_dir, format, content_hash) {
+                staged.take().expect("staged room mod available").discard();
+                return Ok(PreparedCachedMod {
+                    local_mod_id,
+                    imported: false,
+                });
+            }
+
+            let mut taken = TakenSlugs::collect(index, &storage_dir.join("mods"));
+            let (entry, _) = register_staged_mod_with_policy(
+                storage_dir,
+                index,
+                staged.take().expect("staged room mod available"),
+                &mut taken,
+                RegistrationPolicy::PreparedDisabled,
+            )?;
+            Ok(PreparedCachedMod {
+                local_mod_id: entry.id,
+                imported: true,
+            })
+        });
+        if let Some(staged) = staged {
+            staged.discard();
+        }
+        result
+    }
+
     pub fn uninstall_mod_by_id(&self, config: &Config, mod_id: &str) -> AppResult<()> {
         self.mutate_index(config, |storage_dir, index| {
             let Some(pos) = index.mods.iter().position(|m| m.id == mod_id) else {
@@ -239,13 +323,35 @@ pub(crate) fn stage_mod_package(
         .and_then(ModArchiveFormat::from_extension)
         .unwrap_or(ModArchiveFormat::Fantome);
 
+    stage_mod_package_as(storage_dir, &file_path, format, context)
+}
+
+/// Stage a package whose trustworthy format comes from an already validated room manifest.
+///
+/// Room-cache paths are content-addressed and intentionally have no user-controlled extension, so
+/// their format must not be guessed from the cache filename.
+fn stage_mod_package_as(
+    storage_dir: &Path,
+    file_path: &Path,
+    format: ModArchiveFormat,
+    context: &InstallContext<'_>,
+) -> AppResult<StagedMod> {
+    if !file_path.is_file() {
+        return Err(AppError::InvalidPath(file_path.display().to_string()));
+    }
+    if matches!(format, ModArchiveFormat::Unknown) {
+        return Err(AppError::ValidationFailed(
+            "A room archive must be modpkg or fantome".to_string(),
+        ));
+    }
+
     let id = Uuid::new_v4().to_string();
     let mods_dir = storage_dir.join("mods");
     let staging_dir = mods_dir.join(format!("{STAGING_PREFIX}{id}"));
     let staged_archive = mods_dir.join(format!("{STAGING_PREFIX}{id}.{}", format.extension()));
     fs::create_dir_all(&staging_dir)?;
 
-    let staged = stage_into(&staging_dir, &staged_archive, &file_path, format, context)
+    let staged = stage_into(&staging_dir, &staged_archive, file_path, format, context)
         .inspect_err(|_| {
             let _ = fs::remove_dir_all(&staging_dir);
             let _ = fs::remove_file(&staged_archive);
@@ -334,6 +440,28 @@ pub(crate) fn register_staged_mod(
     staged: StagedMod,
     taken: &mut TakenSlugs,
 ) -> AppResult<(LibraryModEntry, InstalledMod)> {
+    register_staged_mod_with_policy(
+        storage_dir,
+        index,
+        staged,
+        taken,
+        RegistrationPolicy::EnableInActiveProfile,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationPolicy {
+    EnableInActiveProfile,
+    PreparedDisabled,
+}
+
+fn register_staged_mod_with_policy(
+    storage_dir: &Path,
+    index: &mut LibraryIndex,
+    staged: StagedMod,
+    taken: &mut TakenSlugs,
+    policy: RegistrationPolicy,
+) -> AppResult<(LibraryModEntry, InstalledMod)> {
     let slug = ModSlug::assign(&staged.project_name, taken);
     let mod_dir = storage_dir.join("mods").join(slug.as_str());
 
@@ -377,14 +505,21 @@ pub(crate) fn register_staged_mod(
         root.mod_ids.insert(0, id.clone());
     }
 
-    let active_profile_id = index.active_profile_id.clone();
-    if let Some(profile) = index
-        .profiles
-        .iter_mut()
-        .find(|p| p.id == active_profile_id)
-    {
-        profile.enabled_mods.insert(0, id.clone());
-        profile.mod_order.insert(0, id.clone());
+    let enabled = matches!(policy, RegistrationPolicy::EnableInActiveProfile);
+    if enabled {
+        let active_profile_id = index.active_profile_id.clone();
+        if let Some(profile) = index
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == active_profile_id)
+        {
+            profile.enabled_mods.insert(0, id.clone());
+            profile.mod_order.insert(0, id.clone());
+        }
+    } else {
+        // A prepared mod is visible in every profile's library order, but remains disabled in all
+        // of them. The dedicated room-profile workflow decides layer state and enablement later.
+        index.sync_profile_orders();
     }
 
     // A re-installed mod can carry a different layer set, which would otherwise
@@ -399,8 +534,60 @@ pub(crate) fn register_staged_mod(
         }
     }
 
-    let installed_mod = read_installed_mod(&entry, true, storage_dir, None)?;
+    let installed_mod = read_installed_mod(&entry, enabled, storage_dir, None)?;
     Ok((entry, installed_mod))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedCachedMod {
+    pub(crate) local_mod_id: String,
+    pub(crate) imported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoomSourceMarker {
+    schema_version: u32,
+    source_sha256: String,
+    library_sha256: String,
+    format: ModArchiveFormat,
+}
+
+fn find_room_source(
+    index: &LibraryIndex,
+    storage_dir: &Path,
+    format: ModArchiveFormat,
+    content_hash: &str,
+) -> Option<String> {
+    index.mods.iter().find_map(|entry| {
+        if entry.format != format || !entry.is_packed() {
+            return None;
+        }
+        let marker = entry.mod_dir(storage_dir).join(ROOM_SOURCE_HASH_FILE);
+        let marker: RoomSourceMarker = fs::read(marker)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
+        (marker.schema_version == 1
+            && marker.source_sha256 == content_hash
+            && marker.format == format
+            && sha256_file(&entry.archive_path(storage_dir))
+                .is_ok_and(|actual| actual == marker.library_sha256))
+        .then(|| entry.id.clone())
+    })
+}
+
+fn sha256_file(path: &Path) -> AppResult<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Stage and register one mod in a single step, for callers already holding

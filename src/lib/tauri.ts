@@ -78,7 +78,7 @@ import type {
   WorkshopProject,
 } from "@/lib/bindings";
 import type { UiError } from "@/lib/bindings.gen";
-import { type BinDocumentId, commands } from "@/lib/bindings.gen";
+import { type BinDocumentId, commands, type RoomManifest } from "@/lib/bindings.gen";
 import type { Result } from "@/utils/result";
 
 export type * from "@/lib/bindings";
@@ -99,6 +99,12 @@ export type {
   KindShape,
   PropertyKind,
   RowNode,
+} from "@/lib/bindings.gen";
+export type {
+  RoomCacheStatus,
+  RoomLocalStatus,
+  RoomPreparationSummary,
+  RoomProfileSummary,
 } from "@/lib/bindings.gen";
 /* The diagnostics types. A serde `default` or `skip_serializing_if` splits a type by
 phase, and a command answers the serialize side, so that side takes the plain name. */
@@ -424,6 +430,24 @@ export const api = {
     checkInstallMismatch: () => commands.checkInstallMismatch().then(toResult),
     switchLeagueInstall: (installRoot: string) =>
       commands.switchLeagueInstall(installRoot).then(toResult),
+  },
+
+  // Room synchronization, on tauri-specta.
+  rooms: {
+    createDraft: (roomId: string) => commands.createRoomDraft(roomId).then(toResult),
+    joinDraft: (roomId: string) => commands.joinRoomDraft(roomId).then(toResult),
+    listMemberships: () => commands.listRoomMemberships().then(toResult),
+    leave: (roomId: string) => commands.leaveRoom(roomId).then(toResult),
+    snapshot: (roomId: string) => commands.getRoomSyncSnapshot(roomId).then(toResult),
+    synchronizeManifest: (manifest: RoomManifest) =>
+      commands.synchronizeRoomManifest(manifest).then(toResult),
+    discardTarget: (roomId: string) => commands.discardRoomTarget(roomId).then(toResult),
+    acceptedManifest: (roomId: string) => commands.getAcceptedRoomManifest(roomId).then(toResult),
+    localStatus: (roomId: string) => commands.getRoomLocalStatus(roomId).then(toResult),
+    cacheStatus: () => commands.getRoomCacheStatus().then(toResult),
+    pruneCache: () => commands.pruneRoomCache().then(toResult),
+    prepareRevision: (roomId: string) => commands.prepareRoomRevision(roomId).then(toResult),
+    createProfile: (roomId: string) => commands.createRoomProfile(roomId).then(toResult),
   },
 
   // Workshop

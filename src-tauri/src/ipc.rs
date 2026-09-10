@@ -50,6 +50,21 @@ migrated![
     // Launcher
     check_install_mismatch,
     switch_league_install,
+    // Room synchronization: this isolated command set has no patcher, launcher, settings, or
+    // active-profile commands, so manifests and room cache state cannot cross into those surfaces.
+    create_room_draft,
+    join_room_draft,
+    list_room_memberships,
+    leave_room,
+    get_room_sync_snapshot,
+    synchronize_room_manifest,
+    discard_room_target,
+    get_accepted_room_manifest,
+    get_room_local_status,
+    get_room_cache_status,
+    prune_room_cache,
+    prepare_room_revision,
+    create_room_profile,
 ];
 
 /// The builder the bindings are generated from and the handler is built out of.

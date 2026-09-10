@@ -13,6 +13,7 @@
       "./messages/{locale}/launcher.json",
       "./messages/{locale}/library.json",
       "./messages/{locale}/patcher.json",
+      "./messages/{locale}/rooms.json",
       "./messages/{locale}/updater.json",
       "./messages/{locale}/workshop.json",
       "./messages/{locale}/shell.json",

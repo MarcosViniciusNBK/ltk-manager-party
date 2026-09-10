@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::mods::ModLibrary;
 use crate::mods::index::LibraryIndex;
-use crate::mods::types::{LibraryFolder, ROOT_FOLDER_ID};
+use crate::mods::types::{LibraryFolder, ProfileOrderMode, ROOT_FOLDER_ID};
 
 /// The folder-shaped view of the index: what groups a mod, and in what order.
 ///
@@ -139,6 +139,27 @@ impl LibraryIndex {
         let mut changed = false;
 
         for profile in &mut self.profiles {
+            if profile.order_mode == ProfileOrderMode::RoomPinned {
+                let before_order = profile.mod_order.len();
+                profile
+                    .mod_order
+                    .retain(|id| flat_set.contains(id.as_str()));
+                changed |= profile.mod_order.len() != before_order;
+
+                let allowed: HashSet<&str> = profile.mod_order.iter().map(String::as_str).collect();
+                let before_enabled = profile.enabled_mods.len();
+                profile
+                    .enabled_mods
+                    .retain(|id| allowed.contains(id.as_str()));
+                changed |= profile.enabled_mods.len() != before_enabled;
+
+                let states = profile.layer_states.len();
+                profile
+                    .layer_states
+                    .retain(|id, _| allowed.contains(id.as_str()));
+                changed |= profile.layer_states.len() != states;
+                continue;
+            }
             if profile.mod_order != flat {
                 profile.mod_order = flat.clone();
                 changed = true;
@@ -423,7 +444,7 @@ mod tests {
     use super::*;
     use crate::mods::index::{LibraryModEntry, ModArchiveFormat};
     use crate::mods::test_support::make_test_entry;
-    use crate::mods::types::{Profile, ProfileSlug};
+    use crate::mods::types::{Profile, ProfileOrderMode, ProfileSlug};
     use chrono::Utc;
     use std::collections::HashMap;
 
@@ -447,6 +468,7 @@ mod tests {
             enabled_mods: enabled.into_iter().map(String::from).collect(),
             mod_order: mod_order.into_iter().map(String::from).collect(),
             layer_states: HashMap::new(),
+            order_mode: ProfileOrderMode::Library,
             created_at: Utc::now(),
             last_used: Utc::now(),
         }

@@ -21,6 +21,7 @@ const MODULES = [
   "library",
   "migration",
   "patcher",
+  "rooms",
   "settings",
   "shell",
   "updater",

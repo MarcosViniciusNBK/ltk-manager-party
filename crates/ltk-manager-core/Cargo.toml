@@ -46,6 +46,7 @@ rayon = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 rmp-serde = { workspace = true }
+rusqlite = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -62,12 +63,14 @@ ts-rs = { workspace = true, optional = true }
 uuid = { workspace = true }
 walkdir = { workspace = true }
 webp = { workspace = true }
+zeroize = { workspace = true }
 zip = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
     "Win32_Security_WinTrust",
     "Win32_Storage_FileSystem",

@@ -81,6 +81,10 @@ export function describeError(error: AppError): ErrorCopy {
       description: m["error.UNTRUSTED_DOMAIN.description"](),
     }))
     .with({ code: "GITHUB" }, (e) => describeGitHubError(e))
+    .with({ code: "ROOM_SYNC" }, () => ({
+      title: m["error.ROOM_SYNC.title"](),
+      description: m["error.ROOM_SYNC.description"](),
+    }))
     .exhaustive();
 }
 

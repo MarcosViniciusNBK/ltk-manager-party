@@ -4,6 +4,7 @@ import {
   MinusIcon,
   SquareIcon,
   StethoscopeIcon,
+  UsersThreeIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { Link } from "@tanstack/react-router";
@@ -37,6 +38,7 @@ const navItems = [
   { to: "/", label: m.home_nav_label(), icon: HouseIcon, exact: true },
   { to: "/mods", label: m.library_nav_label(), icon: CollectionIcon, exact: false },
   { to: "/workshop", label: m.workshop_nav_label(), icon: LootIcon, exact: false },
+  { to: "/rooms", label: m.rooms_nav_label(), icon: UsersThreeIcon, exact: false },
 ] as const;
 
 const tabBaseClass = `relative flex h-full items-center gap-1.5 px-3 text-sm font-medium transition-colors hover:bg-surface-700 ${iconLiftClass}`;

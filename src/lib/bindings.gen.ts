@@ -6,14 +6,14 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	/**
 	 *  Hold `asset` open as a bin, answering the header and the rows at depth zero.
-	 * 
+	 *
 	 *  With no `entry`, the rows are one per object. With one, `0x` and eight hex digits,
 	 *  the rows are that object's properties and the answer carries its header facts.
 	 */
 	binOpen: (asset: AssetRef, entry: string | null) => __TAURI_INVOKE<({ ok: true; value: BinDocumentHandle }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("bin_open", { asset, entry }),
 	/**
 	 *  The rows under one node of an open document, `offset` in and at most `limit` of them.
-	 * 
+	 *
 	 *  `entry` is the object's hash as `0x` and eight hex digits. `path` is the wire form
 	 *  of the property path, empty for the object itself. Every row carries what the meta
 	 *  schema declares for its field at the install's build.
@@ -113,12 +113,65 @@ export const commands = {
 	 *  next start.
 	 */
 	switchLeagueInstall: (installRoot: string) => __TAURI_INVOKE<({ ok: true; value: null }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("switch_league_install", { installRoot }),
+	/**
+	 *  Create local draft state for a room code. This intentionally does not create a remote room;
+	 *  server-side creation, password handling, and owner tokens arrive with the authoritative service.
+	 */
+	createRoomDraft: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("create_room_draft", { roomId }),
+	/**
+	 *  Join local draft state for a room code. It has no network side effect and does not accept a
+	 *  password or token, so neither can accidentally be logged or stored in renderer state.
+	 */
+	joinRoomDraft: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("join_room_draft", { roomId }),
+	/**  List local memberships and their last accepted revision. */
+	listRoomMemberships: () => __TAURI_INVOKE<({ ok: true; value: JoinedRoom[] }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("list_room_memberships"),
+	/**
+	 *  Leave local room state. Imported library mods and profiles remain local; cache cleanup requires
+	 *  the separate explicit prune command.
+	 */
+	leaveRoom: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: boolean }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("leave_room", { roomId }),
+	/**  Restore the durable snapshot for one room without making a network request. */
+	getRoomSyncSnapshot: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_room_sync_snapshot", { roomId }),
+	/**
+	 *  Submit one manifest from the isolated room transport.
+	 *
+	 *  It stages, verifies, and atomically accepts only already-cached blobs. Missing blobs remain a
+	 *  pending room transfer; no mod is installed, enabled, applied, or launched.
+	 */
+	synchronizeRoomManifest: (manifest: RoomManifest) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("synchronize_room_manifest", { manifest }),
+	/**
+	 *  Discard an incomplete target revision while retaining the last accepted revision and its cache
+	 *  references.
+	 */
+	discardRoomTarget: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("discard_room_target", { roomId }),
+	/**  Read the complete accepted room manifest, if this machine has one. */
+	getAcceptedRoomManifest: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomManifest | null }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_accepted_room_manifest", { roomId }),
+	/**
+	 *  Read durable local workflow facts for a room. This is informational only: a profile binding
+	 *  does not select the profile, and neither preparation nor profile creation applies anything to
+	 *  the game.
+	 */
+	getRoomLocalStatus: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomLocalStatus }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_room_local_status", { roomId }),
+	/**  Report cache reference and pending-transfer counts without revealing local paths. */
+	getRoomCacheStatus: () => __TAURI_INVOKE<({ ok: true; value: RoomCacheStatus }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_room_cache_status"),
+	/**  Explicitly prune only unreferenced room-cache blobs. It cannot delete an installed library mod. */
+	pruneRoomCache: () => __TAURI_INVOKE<({ ok: true; value: CachePruneReport }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("prune_room_cache"),
+	/**
+	 *  Explicitly import the accepted revision through the existing archive pipeline, registered
+	 *  disabled. This command never selects a profile or starts the patcher.
+	 */
+	prepareRoomRevision: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomPreparationSummary }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("prepare_room_revision", { roomId }),
+	/**
+	 *  Explicitly create/update the non-active profile corresponding to an already prepared revision.
+	 *  The existing profile switch and Start/Play commands remain separate user actions.
+	 */
+	createRoomProfile: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomProfileSummary }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("create_room_profile", { roomId }),
 };
 
 /* Types */
 /**
  *  What went wrong, as the fields the frontend translates over.
- * 
+ *
  *  The frontend owns every sentence a user reads (ADR-0017), so no variant
  *  carries one. A `detail` is prose from outside the app, such as an OS or
  *  crate error, which the frontend draws as data under a title of its own.
@@ -201,11 +254,16 @@ export type AppErrorResponse =
  *  Something GitHub publishes could not be read. The kind says which
  *  remedy applies, and the feed says what was being read.
  */
-{ code: "GITHUB"; feed: GitHubFeed; kind: GitHubErrorKind; detail: string };
+{ code: "GITHUB"; feed: GitHubFeed; kind: GitHubErrorKind; detail: string } |
+/**
+ *  A room synchronization operation failed. Raw room errors can contain local paths, so only
+ *  this stable category reaches the webview.
+ */
+{ code: "ROOM_SYNC"; kind: RoomSyncErrorKind };
 
 /**
  *  Where a previewed asset's bytes come from.
- * 
+ *
  *  A reference crosses IPC from the webview, so every path in one is untrusted.
  *  [`read`](Self::read) checks a relative path against the root it belongs to
  *  rather than joining it on, and [`File`](Self::File) is the one variant that
@@ -367,6 +425,11 @@ export type BinaryId = {
 	built: number | null,
 };
 
+export type CachePruneReport = {
+	removedBlobs: number,
+	reclaimedBytes: number,
+};
+
 /**  Coarse grouping for the UI. */
 export type Category = 
 /**  OS-level checks (Windows version, UAC, long paths). */
@@ -472,6 +535,9 @@ export type Consequence =
 "game-hung" | 
 /**  The game did not survive. */
 "game-stopped";
+
+/**  SHA-256 rendered as exactly 64 lowercase hexadecimal characters. */
+export type ContentHash = string;
 
 /**  What the schema declares for a field, beside whether the file's kind is that. */
 export type DeclaredKind = {
@@ -816,6 +882,14 @@ export type InstallMismatch = {
 	sessionPath: string,
 };
 
+export type JoinedRoom = {
+	roomId: string,
+	memberId: string,
+	lastAcceptedRevision: number,
+	joinedAtMs: number,
+	updatedAtMs: number,
+};
+
 /**
  *  A type as the tag composes it: the kind, a `Map`'s key, and what a container holds.
  * 
@@ -973,6 +1047,100 @@ export type PatcherError =
  *  compile error here.
  */
 export type PropertyKind = "none" | "bool" | "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" | "f32" | "vec2" | "vec3" | "vec4" | "mtx44" | "rgba" | "string" | "hash" | "file" | "list" | "list2" | "pointer" | "embed" | "link" | "option" | "map" | "flag";
+
+/**  Cache facts suitable for IPC. File paths and room credentials never cross this boundary. */
+export type RoomCacheStatus = {
+	joinedRooms: number,
+	referencedBlobs: number,
+	pendingTransfers: number,
+};
+
+/**
+ *  Durable local workflow facts suitable for the room UI.
+ *
+ *  It contains no cache paths, credentials, local-mod mappings, or game state. A profile binding
+ *  only identifies the profile the user may choose through the existing profile flow.
+ */
+export type RoomLocalStatus = {
+	preparedRevision: number | null,
+	profile: RoomProfileBinding | null,
+};
+
+/**  Immutable description of the exact files in one room revision. */
+export type RoomManifest = {
+	schemaVersion: number,
+	roomId: string,
+	revision: number,
+	/**  Informational compatibility value. Synchronization itself does not inspect the game. */
+	gameBuild: string | null,
+	/**  Manifest order is the suggested future profile priority order. */
+	mods: RoomMod[],
+};
+
+/**  One immutable file referenced by a room revision. */
+export type RoomMod = {
+	contentHash: ContentHash,
+	sizeBytes: number,
+	format: RoomModFormat,
+	/**  Display-only metadata; it is never used as a filesystem path. */
+	displayName: string,
+	/**  Display-only source version. */
+	version: string,
+	/**  A suggestion for an explicit future local import action, not an instruction to apply it. */
+	suggestedLayers?: string[],
+};
+
+/**  Formats accepted as immutable room blobs. */
+export type RoomModFormat = "modpkg" | "fantome";
+
+/**
+ *  Summary of an explicit local preparation. Local UUIDs remain internal to the library and are
+ *  available through its existing APIs; no game-changing action has happened at this point.
+ */
+export type RoomPreparationSummary = {
+	roomId: string,
+	revision: number,
+	importedCount: number,
+	reusedCount: number,
+};
+
+export type RoomProfileBinding = {
+	roomId: string,
+	revision: number,
+	localProfileId: string,
+	updatedAtMs: number,
+};
+
+/**
+ *  Result of creating/updating the dedicated room profile. The profile is not selected; the user
+ *  must use the existing profile chooser and Start/Play flow themselves.
+ */
+export type RoomProfileSummary = {
+	roomId: string,
+	revision: number,
+	profileId: string,
+};
+
+export type RoomSyncBlockReason = "authorization" | "protocol" | "storage" | "integrity" | "compatibility";
+
+/**  Stable categories for the isolated room synchronization IPC boundary. */
+export type RoomSyncErrorKind = "STATE" | "CACHE" | "SYNCHRONIZATION" | "PREPARATION" | "PROFILE" | "INTERRUPTED";
+
+export type RoomSyncPhase = "disconnected" | "connecting" | "comparing" | "transferring" | "verifying" | "synchronized" | "stale" | "blocked";
+
+export type RoomSyncSnapshot = {
+	roomId: string,
+	phase: RoomSyncPhase,
+	/**  Last revision committed transactionally and safe to keep using. */
+	activeRevision: number,
+	/**  Revision being compared/downloaded, or one announced by the server. */
+	targetRevision: number | null,
+	totalBlobs: number,
+	verifiedBlobs: number,
+	missingBlobs: number,
+	previousRevisionAvailable: boolean,
+	blockReason: RoomSyncBlockReason | null,
+};
 
 /**  Where a row sits in the tree. */
 export type RowNode = 
@@ -1215,4 +1383,3 @@ export type Verdict_Serialize = {
 export type WorkshopError = 
 /**  One or more files already exist in the target layer directory. */
 { kind: "LAYER_FILE_CONFLICT"; conflicts: string[] };
-

@@ -9,6 +9,7 @@ use crate::mods::{
     ChecksumMismatchState, LinkedBinState, ModLibrary, ModLibraryState, WadReportState,
 };
 use crate::patcher::{PatcherHostState, PatcherState};
+use crate::rooms::RoomSyncState;
 use crate::state::{IncidentStoreState, SettingsState};
 use crate::workshop::{Workshop, WorkshopState};
 use ltk_manager_core::diagnostics::store::IncidentStore;
@@ -81,7 +82,7 @@ pub fn run(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let mod_library = ModLibraryState(ModLibrary::new(
         Arc::clone(&events),
-        default_storage_dir,
+        default_storage_dir.clone(),
         env!("CARGO_PKG_VERSION"),
         Arc::clone(&linked_bins),
         Arc::clone(&checksum_mismatches),
@@ -90,6 +91,23 @@ pub fn run(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let library = mod_library.0.clone();
+    let room_data_dir = default_storage_dir.clone().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Could not determine the application data directory for room synchronization",
+        )
+    })?;
+    // The room cache is kept beside application state, never under either place that holds
+    // installed mod content. The cache itself rejects overlap in both directions.
+    let room_storage_dir = library.storage_dir(&settings.config)?;
+    let room_sync = RoomSyncState::open(
+        &room_data_dir,
+        &[
+            room_storage_dir.join("mods"),
+            room_storage_dir.join("archives"),
+        ],
+        Arc::clone(&events),
+    )?;
 
     let hotkey_manager = crate::hotkeys::HotkeyManager::new(&app_handle);
     hotkey_manager.register_from_settings(&settings);
@@ -133,6 +151,7 @@ pub fn run(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(ltk_manager_core::hashtables::BinHashTablesState::default());
     app.manage(crate::commands::ExtractState::default());
     app.manage(mod_library);
+    app.manage(room_sync);
     app.manage(workshop);
     app.manage(hotkey_manager);
     app.manage(deep_link_state);

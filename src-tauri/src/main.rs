@@ -18,6 +18,7 @@ mod news;
 pub mod patcher;
 mod protocol;
 mod releases;
+mod rooms;
 mod setup;
 mod state;
 mod telemetry;

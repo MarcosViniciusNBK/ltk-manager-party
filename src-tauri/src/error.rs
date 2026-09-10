@@ -113,6 +113,22 @@ pub enum AppErrorResponse {
         kind: GitHubErrorKind,
         detail: String,
     },
+    /// A room synchronization operation failed. Raw room errors can contain local paths, so only
+    /// this stable category reaches the webview.
+    RoomSync { kind: RoomSyncErrorKind },
+}
+
+/// Stable categories for the isolated room synchronization IPC boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, specta::Type)]
+#[ts(export)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RoomSyncErrorKind {
+    State,
+    Cache,
+    Synchronization,
+    Preparation,
+    Profile,
+    Interrupted,
 }
 
 /// Which of the things GitHub publishes a read was after.

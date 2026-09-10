@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::mods::ModStorage;
+use crate::room_sync::{RoomSyncSnapshot, TransferProgress};
 
 /// The launcher's payloads are defined alongside the code that produces them,
 /// and re-exported here so every payload in the registry below can be named
@@ -300,6 +301,31 @@ pub struct ExtractProgress {
     pub archive: String,
 }
 
+/// A locally observed member-state transition for one synchronized room.
+///
+/// The service added later supplies remote presence; the desktop already uses the same event for
+/// its own join and leave transitions. Neither variant carries a password, token, endpoint, or
+/// filesystem path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS, specta::Type))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub enum RoomPresenceState {
+    Joined,
+    Left,
+}
+
+/// One presence transition announced to room UI listeners.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS, specta::Type))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct RoomPresenceChanged {
+    pub room_id: String,
+    pub member_id: String,
+    pub state: RoomPresenceState,
+}
+
 /// Stage of a git repository import.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -416,6 +442,12 @@ declare_events! {
     HashtableSyncProgress(HashtableSyncProgress) => "hashtable-sync-progress",
     /// An extract of game chunks to disk advanced. Throttled by its emitter.
     ExtractProgress(ExtractProgress) => "extract-progress",
+    /// A room's durable synchronization state changed. It never changes the active profile.
+    RoomSyncProgress(RoomSyncSnapshot) => "room-sync-progress",
+    /// A room blob transfer advanced. Emitted at a bounded rate by the desktop room state.
+    RoomTransferProgress(TransferProgress) => "room-transfer-progress",
+    /// A room member joined or left. Emitted at a bounded rate by the desktop room state.
+    RoomPresenceChanged(RoomPresenceChanged) => "room-presence-changed",
 }
 
 #[cfg(test)]
