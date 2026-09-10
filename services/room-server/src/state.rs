@@ -1,7 +1,7 @@
 //! Shared server application state.
 
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -11,6 +11,7 @@ use crate::rate_limit::RateLimiter;
 pub struct AppState {
     pub db: PgPool,
     pub rooms: Arc<RwLock<HashMap<String, broadcast::Sender<RoomEvent>>>>,
+    pub active_connections: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub rate_limiter: RateLimiter,
 }
 
@@ -26,6 +27,7 @@ impl AppState {
         Self {
             db,
             rooms: Arc::new(RwLock::new(HashMap::new())),
+            active_connections: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: RateLimiter::default(),
         }
     }
@@ -39,5 +41,31 @@ impl AppState {
             rooms.insert(room_id.to_string(), sender.clone());
             sender
         }
+    }
+
+    pub async fn add_connection(&self, room_id: &str, member_id: &str) {
+        let mut conns = self.active_connections.write().await;
+        conns
+            .entry(room_id.to_string())
+            .or_default()
+            .insert(member_id.to_string());
+    }
+
+    pub async fn remove_connection(&self, room_id: &str, member_id: &str) -> bool {
+        let mut conns = self.active_connections.write().await;
+        if let Some(members) = conns.get_mut(room_id) {
+            members.remove(member_id);
+            members.is_empty()
+        } else {
+            false
+        }
+    }
+
+    pub async fn is_member_connected(&self, room_id: &str, member_id: &str) -> bool {
+        let conns = self.active_connections.read().await;
+        conns
+            .get(room_id)
+            .map(|members| members.contains(member_id))
+            .unwrap_or(false)
     }
 }

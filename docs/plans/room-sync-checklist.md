@@ -110,10 +110,16 @@ by the user.
       in-memory sliding window rate limiting (5 attempts/min -> 429), `POST /v1/rooms`, `POST /v1/rooms/:id/join`,
       authenticated metadata query, and WebSocket token verification. Tested and live on VPS.
 
-14. [ ] Implement authoritative revisions and presence.
+14. [x] Implement authoritative revisions and presence.
     - Monotonic revisions with compare-and-swap updates to prevent two writers from racing.
     - Member acknowledgements identify the exact verified revision.
     - Reconnect, owner disconnect, ownership transfer, room expiry, and stale-member behavior.
+    - Implemented in `services/room-server` with CAS revision validation (`previous_revision` check,
+      `409 Conflict`), `POST /v1/rooms/:id/manifest`, `GET /v1/rooms/:id/manifest`,
+      `POST /v1/rooms/:id/ack`, `GET /v1/rooms/:id/members`, `POST /v1/rooms/:id/transfer_owner`,
+      real-time WebSocket presence broadcasting (`member_presence`, `owner_disconnected`,
+      `member_acknowledged`), 24-hour inactivity room expiration with automatic background pruning,
+      and migration 000003. Tested live on VPS at `http://177.153.59.168:3000`.
 
 15. [ ] Integrate content-addressed object storage.
     - S3-compatible storage with short-lived signed upload/download URLs.

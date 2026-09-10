@@ -1,4 +1,4 @@
-//! Authenticated WebSocket events for presence and room synchronization.
+//! Authenticated WebSocket events for presence, acknowledgements, and room synchronization.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -6,9 +6,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use crate::state::AppState;
+use crate::state::{AppState, RoomEvent};
 
 #[derive(Debug, Deserialize)]
 pub struct WsAuthQuery {
@@ -16,7 +16,6 @@ pub struct WsAuthQuery {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct WsIncoming {
     pub action: String,
     pub payload: Option<serde_json::Value>,
@@ -47,16 +46,12 @@ pub async fn ws_handler(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    let is_owner: Option<bool> =
-        sqlx::query_scalar("SELECT (owner_token = $1) FROM rooms WHERE room_id = $2")
-            .bind(&token)
-            .bind(&room_id)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None);
-
-    let is_member: Option<bool> = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM room_members WHERE room_id = $1 AND member_token = $2)",
+    // Identify member and role from token
+    let member_info: Option<(String, String)> = sqlx::query_as(
+        "SELECT member_id, role FROM room_members WHERE room_id = $1 AND member_token = $2 \
+         UNION \
+         SELECT rm.member_id, 'owner' as role FROM room_members rm JOIN rooms r ON rm.room_id = r.room_id \
+         WHERE r.room_id = $1 AND r.owner_token = $2 LIMIT 1",
     )
     .bind(&room_id)
     .bind(&token)
@@ -64,23 +59,46 @@ pub async fn ws_handler(
     .await
     .unwrap_or(None);
 
-    let authorized = is_owner.unwrap_or(false) || is_member.unwrap_or(false);
-    if !authorized {
+    let Some((member_id, role)) = member_info else {
         return Err(StatusCode::UNAUTHORIZED);
-    }
+    };
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, room_id, state)))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, room_id, member_id, role, state)))
 }
 
-async fn handle_socket(socket: WebSocket, room_id: String, state: AppState) {
+async fn handle_socket(
+    socket: WebSocket,
+    room_id: String,
+    member_id: String,
+    role: String,
+    state: AppState,
+) {
     let (mut sender, mut receiver) = socket.split();
     let broadcaster = state.get_or_create_room_channel(&room_id).await;
     let mut rx = broadcaster.subscribe();
 
-    info!(room_id = %room_id, "WebSocket client connected to room");
+    // Register active presence
+    state.add_connection(&room_id, &member_id).await;
+    let _ = sqlx::query("UPDATE room_members SET last_seen_at = NOW() WHERE room_id = $1 AND member_id = $2")
+        .bind(&room_id)
+        .bind(&member_id)
+        .execute(&state.db)
+        .await;
 
-    // Spawn broadcast receiver task -> send to client
-    let room_id_clone = room_id.clone();
+    info!(room_id = %room_id, member_id = %member_id, role = %role, "WebSocket client connected");
+
+    // Broadcast member_presence (joined)
+    let _ = broadcaster.send(RoomEvent {
+        room_id: room_id.clone(),
+        event_type: "member_presence".to_string(),
+        payload: serde_json::json!({
+            "member_id": member_id,
+            "role": role,
+            "state": "joined",
+        }),
+    });
+
+    // Task 1: Broadcast events to client
     let mut send_task = tokio::spawn(async move {
         while let Ok(event) = rx.recv().await {
             let msg = serde_json::to_string(&WsOutgoing {
@@ -95,15 +113,61 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: AppState) {
         }
     });
 
-    // Receive task from client
+    // Task 2: Receive messages from client
+    let room_id_recv = room_id.clone();
+    let member_id_recv = member_id.clone();
+    let state_recv = state.clone();
+    let broadcaster_recv = broadcaster.clone();
+
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
-                    debug!(room_id = %room_id_clone, message = %text, "Received WS message");
+                    debug!(room_id = %room_id_recv, member_id = %member_id_recv, "Received WS message: {}", text);
                     if let Ok(incoming) = serde_json::from_str::<WsIncoming>(&text) {
-                        if incoming.action == "ping" {
-                            // Client ping - can be echoed or answered
+                        match incoming.action.as_str() {
+                            "ping" => {
+                                let _ = sqlx::query("UPDATE room_members SET last_seen_at = NOW() WHERE room_id = $1 AND member_id = $2")
+                                    .bind(&room_id_recv)
+                                    .bind(&member_id_recv)
+                                    .execute(&state_recv.db)
+                                    .await;
+                            }
+                            "ack" => {
+                                if let Some(payload) = incoming.payload {
+                                    if let Some(rev) = payload.get("revision").and_then(|r| r.as_i64()) {
+                                        let status = payload
+                                            .get("status")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("synchronized");
+
+                                        let _ = sqlx::query(
+                                            "UPDATE room_members SET last_acknowledged_revision = $1, ack_status = $2, last_seen_at = NOW() \
+                                             WHERE room_id = $3 AND member_id = $4",
+                                        )
+                                        .bind(rev)
+                                        .bind(status)
+                                        .bind(&room_id_recv)
+                                        .bind(&member_id_recv)
+                                        .execute(&state_recv.db)
+                                        .await;
+
+                                        let _ = broadcaster_recv.send(RoomEvent {
+                                            room_id: room_id_recv.clone(),
+                                            event_type: "member_acknowledged".to_string(),
+                                            payload: serde_json::json!({
+                                                "room_id": room_id_recv,
+                                                "member_id": member_id_recv,
+                                                "revision": rev,
+                                                "status": status,
+                                            }),
+                                        });
+                                    }
+                                }
+                            }
+                            other => {
+                                warn!(action = %other, "Unknown WebSocket action requested");
+                            }
                         }
                     }
                 }
@@ -114,11 +178,38 @@ async fn handle_socket(socket: WebSocket, room_id: String, state: AppState) {
         }
     });
 
-    // If either task completes, abort the other
     tokio::select! {
         _ = (&mut send_task) => recv_task.abort(),
         _ = (&mut recv_task) => send_task.abort(),
     }
 
-    info!(room_id = %room_id, "WebSocket client disconnected from room");
+    // Cleanup presence on disconnect
+    state.remove_connection(&room_id, &member_id).await;
+
+    // Broadcast member_presence (left)
+    let _ = broadcaster.send(RoomEvent {
+        room_id: room_id.clone(),
+        event_type: "member_presence".to_string(),
+        payload: serde_json::json!({
+            "member_id": member_id,
+            "role": role,
+            "state": "left",
+        }),
+    });
+
+    // If the disconnecting client was the owner, broadcast owner_disconnected alert
+    if role == "owner" {
+        warn!(room_id = %room_id, member_id = %member_id, "Room owner disconnected");
+        let _ = broadcaster.send(RoomEvent {
+            room_id: room_id.clone(),
+            event_type: "owner_disconnected".to_string(),
+            payload: serde_json::json!({
+                "room_id": room_id,
+                "member_id": member_id,
+                "warning": "Room owner disconnected from the session",
+            }),
+        });
+    }
+
+    info!(room_id = %room_id, member_id = %member_id, "WebSocket client disconnected");
 }

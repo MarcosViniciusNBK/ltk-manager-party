@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod manifest;
 mod rate_limit;
 mod routes;
 mod state;
@@ -53,6 +54,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Running pending database migrations...");
     sqlx::migrate!("./migrations").run(&pool).await?;
     info!("Database migrations applied successfully.");
+
+    // Background maintenance worker: prune expired rooms periodically
+    let pool_cleanup = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            let res = sqlx::query("DELETE FROM rooms WHERE expires_at < NOW()")
+                .execute(&pool_cleanup)
+                .await;
+            match res {
+                Ok(r) if r.rows_affected() > 0 => {
+                    info!(cleaned_rooms = r.rows_affected(), "Cleaned up expired rooms");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Room cleanup background task error");
+                }
+                _ => {}
+            }
+        }
+    });
 
     let state = AppState::new(pool);
 

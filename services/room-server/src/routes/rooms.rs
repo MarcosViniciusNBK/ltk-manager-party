@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use crate::auth::{generate_high_entropy_token, hash_password, verify_password};
 use crate::error::ErrorResponse;
+use crate::manifest::RoomManifest;
 use crate::state::{AppState, RoomEvent};
 
 #[derive(Debug, Deserialize)]
@@ -44,7 +45,61 @@ pub struct RoomInfoResponse {
     pub revision: i64,
     pub game_build: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
     pub active_members: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublishManifestRequest {
+    pub previous_revision: i64,
+    pub manifest: RoomManifest,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublishManifestResponse {
+    pub room_id: String,
+    pub revision: i64,
+    pub mod_count: usize,
+    pub total_size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AckRevisionRequest {
+    pub revision: i64,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AckRevisionResponse {
+    pub success: bool,
+    pub member_id: String,
+    pub revision: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemberInfo {
+    pub member_id: String,
+    pub role: String,
+    pub last_acknowledged_revision: i64,
+    pub ack_status: String,
+    pub joined_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+    pub is_online: bool,
+    pub is_stale: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransferOwnerRequest {
+    pub new_owner_member_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferOwnerResponse {
+    pub success: bool,
+    pub room_id: String,
+    pub previous_owner: String,
+    pub new_owner: String,
 }
 
 /// Create a new room with password protection and receive authoritative owner and member tokens.
@@ -112,7 +167,6 @@ pub async fn create_room(
         )
     })?;
 
-    // Check if room already exists
     let exists: Option<String> = sqlx::query_scalar("SELECT room_id FROM rooms WHERE room_id = $1")
         .bind(&room_id)
         .fetch_optional(&mut *tx)
@@ -130,9 +184,9 @@ pub async fn create_room(
         ));
     }
 
-    // Insert room
     sqlx::query(
-        "INSERT INTO rooms (room_id, revision, password_hash, owner_token, game_build) VALUES ($1, 0, $2, $3, $4)",
+        "INSERT INTO rooms (room_id, revision, password_hash, owner_token, game_build, expires_at) \
+         VALUES ($1, 0, $2, $3, $4, NOW() + INTERVAL '24 hours')",
     )
     .bind(&room_id)
     .bind(&password_hash)
@@ -142,9 +196,9 @@ pub async fn create_room(
     .await
     .map_err(db_error)?;
 
-    // Register owner as initial member
     sqlx::query(
-        "INSERT INTO room_members (room_id, member_id, member_token, role, last_acknowledged_revision) VALUES ($1, $2, $3, 'owner', 0)",
+        "INSERT INTO room_members (room_id, member_id, member_token, role, last_acknowledged_revision, ack_status) \
+         VALUES ($1, $2, $3, 'owner', 0, 'synchronized')",
     )
     .bind(&room_id)
     .bind(&owner_member_id)
@@ -177,7 +231,6 @@ pub async fn join_room(
 ) -> Result<Json<JoinRoomResponse>, (StatusCode, Json<ErrorResponse>)> {
     let client_ip = extract_client_ip(&headers);
 
-    // Rate-limiting check
     if !state.rate_limiter.check(client_ip, &room_id).await {
         warn!(room_id = %room_id, ip = %client_ip, "Rate limit exceeded on join attempts");
         return Err((
@@ -190,14 +243,14 @@ pub async fn join_room(
         ));
     }
 
-    let room: Option<(String, i64)> =
-        sqlx::query_as("SELECT password_hash, revision FROM rooms WHERE room_id = $1")
+    let room: Option<(String, i64, bool)> =
+        sqlx::query_as("SELECT password_hash, revision, (expires_at < NOW()) as is_expired FROM rooms WHERE room_id = $1")
             .bind(&room_id)
             .fetch_optional(&state.db)
             .await
             .map_err(db_error)?;
 
-    let Some((password_hash, revision)) = room else {
+    let Some((password_hash, revision, is_expired)) = room else {
         state.rate_limiter.record_failure(client_ip, &room_id).await;
         return Err((
             StatusCode::NOT_FOUND,
@@ -208,6 +261,17 @@ pub async fn join_room(
             }),
         ));
     };
+
+    if is_expired {
+        return Err((
+            StatusCode::GONE,
+            Json(ErrorResponse {
+                error: format!("Room '{room_id}' has expired due to inactivity"),
+                code: "ROOM_EXPIRED".to_string(),
+                details: None,
+            }),
+        ));
+    }
 
     if !verify_password(&payload.password, &password_hash) {
         state.rate_limiter.record_failure(client_ip, &room_id).await;
@@ -222,7 +286,6 @@ pub async fn join_room(
         ));
     }
 
-    // Success: reset rate limit counter
     state.rate_limiter.reset(client_ip, &room_id).await;
 
     let member_token = generate_high_entropy_token();
@@ -232,8 +295,8 @@ pub async fn join_room(
         .unwrap_or_else(|| format!("member-{}", &member_token[..8]));
 
     sqlx::query(
-        "INSERT INTO room_members (room_id, member_id, member_token, role, last_acknowledged_revision, last_seen_at) \
-         VALUES ($1, $2, $3, 'member', 0, NOW()) \
+        "INSERT INTO room_members (room_id, member_id, member_token, role, last_acknowledged_revision, ack_status, last_seen_at) \
+         VALUES ($1, $2, $3, 'member', 0, 'joined', NOW()) \
          ON CONFLICT (room_id, member_id) DO UPDATE SET member_token = $3, last_seen_at = NOW()",
     )
     .bind(&room_id)
@@ -243,7 +306,11 @@ pub async fn join_room(
     .await
     .map_err(db_error)?;
 
-    // Broadcast presence event to room WebSocket subscribers
+    let _ = sqlx::query("UPDATE rooms SET expires_at = NOW() + INTERVAL '24 hours' WHERE room_id = $1")
+        .bind(&room_id)
+        .execute(&state.db)
+        .await;
+
     let channel = state.get_or_create_room_channel(&room_id).await;
     let _ = channel.send(RoomEvent {
         room_id: room_id.clone(),
@@ -272,45 +339,16 @@ pub async fn get_room_info(
     headers: HeaderMap,
 ) -> Result<Json<RoomInfoResponse>, (StatusCode, Json<ErrorResponse>)> {
     let token = extract_token(&headers)?;
+    verify_room_authorization(&state, &room_id, &token).await?;
 
-    // Check if token matches owner or any member
-    let is_owner: Option<bool> =
-        sqlx::query_scalar("SELECT (owner_token = $1) FROM rooms WHERE room_id = $2")
-            .bind(&token)
+    let room: Option<(i64, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)> =
+        sqlx::query_as("SELECT revision, game_build, created_at, expires_at, (expires_at < NOW()) as is_expired FROM rooms WHERE room_id = $1")
             .bind(&room_id)
             .fetch_optional(&state.db)
             .await
             .map_err(db_error)?;
 
-    let is_member: Option<bool> = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM room_members WHERE room_id = $1 AND member_token = $2)",
-    )
-    .bind(&room_id)
-    .bind(&token)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(db_error)?;
-
-    let authorized = is_owner.unwrap_or(false) || is_member.unwrap_or(false);
-    if !authorized {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "Invalid or missing token for this room".to_string(),
-                code: "UNAUTHORIZED".to_string(),
-                details: None,
-            }),
-        ));
-    }
-
-    let room: Option<(i64, Option<String>, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as("SELECT revision, game_build, created_at FROM rooms WHERE room_id = $1")
-            .bind(&room_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(db_error)?;
-
-    let Some((revision, game_build, created_at)) = room else {
+    let Some((revision, game_build, created_at, expires_at, is_expired)) = room else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -320,6 +358,17 @@ pub async fn get_room_info(
             }),
         ));
     };
+
+    if is_expired {
+        return Err((
+            StatusCode::GONE,
+            Json(ErrorResponse {
+                error: format!("Room '{room_id}' has expired due to inactivity"),
+                code: "ROOM_EXPIRED".to_string(),
+                details: None,
+            }),
+        ));
+    }
 
     let active_members: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM room_members WHERE room_id = $1 AND last_seen_at > NOW() - INTERVAL '5 minutes'",
@@ -334,11 +383,551 @@ pub async fn get_room_info(
         revision,
         game_build,
         created_at,
+        expires_at,
         active_members,
     }))
 }
 
-fn extract_token(headers: &HeaderMap) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+/// Publish a new authoritative manifest revision with Compare-and-Swap (CAS) update.
+/// Only the owner of the room can publish.
+pub async fn publish_manifest(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<PublishManifestRequest>,
+) -> Result<(StatusCode, Json<PublishManifestResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+
+    let room_res: Option<(i64, Option<String>, bool)> = sqlx::query_as(
+        "SELECT revision, owner_token, (expires_at < NOW()) as is_expired FROM rooms WHERE room_id = $1",
+    )
+    .bind(&room_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let Some((current_revision, owner_token, is_expired)) = room_res else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Room '{room_id}' not found"),
+                code: "ROOM_NOT_FOUND".to_string(),
+                details: None,
+            }),
+        ));
+    };
+
+    if is_expired {
+        return Err((
+            StatusCode::GONE,
+            Json(ErrorResponse {
+                error: format!("Room '{room_id}' has expired due to inactivity"),
+                code: "ROOM_EXPIRED".to_string(),
+                details: None,
+            }),
+        ));
+    }
+
+    // Role check: Only owner may publish
+    if owner_token.as_deref() != Some(&token) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only the room owner is authorized to publish manifest revisions".to_string(),
+                code: "NOT_ROOM_OWNER".to_string(),
+                details: None,
+            }),
+        ));
+    }
+
+    // CAS check: previous_revision must match current_revision
+    if current_revision != payload.previous_revision {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Manifest revision conflict: expected previous revision does not match current revision".to_string(),
+                code: "REVISION_CONFLICT".to_string(),
+                details: Some(format!(
+                    "Current server revision is {}, but request asserted {}",
+                    current_revision, payload.previous_revision
+                )),
+            }),
+        ));
+    }
+
+    let new_revision = current_revision + 1;
+
+    // Validate manifest content & limits
+    payload
+        .manifest
+        .validate(&room_id, new_revision as u64)
+        .map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Manifest validation failed: {err}"),
+                    code: "INVALID_MANIFEST".to_string(),
+                    details: None,
+                }),
+            )
+        })?;
+
+    let mod_count = payload.manifest.mods.len();
+    let total_size_bytes: u64 = payload.manifest.mods.iter().map(|m| m.size_bytes).sum();
+    let manifest_json = serde_json::to_value(&payload.manifest).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to serialize manifest JSON".to_string(),
+                code: "SERIALIZATION_ERROR".to_string(),
+                details: Some(e.to_string()),
+            }),
+        )
+    })?;
+
+    let mut tx = state.db.begin().await.map_err(db_error)?;
+
+    // Atomic CAS update on rooms
+    let update_res = sqlx::query(
+        "UPDATE rooms SET revision = $1, game_build = $2, updated_at = NOW(), expires_at = NOW() + INTERVAL '24 hours' \
+         WHERE room_id = $3 AND revision = $4",
+    )
+    .bind(new_revision)
+    .bind(&payload.manifest.game_build)
+    .bind(&room_id)
+    .bind(current_revision)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_error)?;
+
+    if update_res.rows_affected() == 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Concurrent update conflict detected on room revision".to_string(),
+                code: "REVISION_CONFLICT".to_string(),
+                details: None,
+            }),
+        ));
+    }
+
+    // Insert into room_manifests
+    sqlx::query(
+        "INSERT INTO room_manifests (room_id, revision, schema_version, game_build, manifest_json, created_at) \
+         VALUES ($1, $2, $3, $4, $5, NOW())",
+    )
+    .bind(&room_id)
+    .bind(new_revision)
+    .bind(payload.manifest.schema_version as i32)
+    .bind(&payload.manifest.game_build)
+    .bind(&manifest_json)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_error)?;
+
+    // Owner is automatically acknowledged at new revision
+    sqlx::query(
+        "UPDATE room_members SET last_acknowledged_revision = $1, ack_status = 'synchronized', last_seen_at = NOW() \
+         WHERE room_id = $2 AND role = 'owner'",
+    )
+    .bind(new_revision)
+    .bind(&room_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_error)?;
+
+    tx.commit().await.map_err(db_error)?;
+
+    let channel = state.get_or_create_room_channel(&room_id).await;
+    let _ = channel.send(RoomEvent {
+        room_id: room_id.clone(),
+        event_type: "manifest_published".to_string(),
+        payload: serde_json::json!({
+            "room_id": room_id,
+            "revision": new_revision,
+            "game_build": payload.manifest.game_build,
+            "mod_count": mod_count,
+            "total_size_bytes": total_size_bytes,
+            "manifest": payload.manifest
+        }),
+    });
+
+    info!(
+        room_id = %room_id,
+        revision = new_revision,
+        mods = mod_count,
+        "Authoritative manifest published successfully"
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(PublishManifestResponse {
+            room_id,
+            revision: new_revision,
+            mod_count,
+            total_size_bytes,
+        }),
+    ))
+}
+
+/// Retrieve the latest published manifest for the room.
+pub async fn get_latest_manifest(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+    verify_room_authorization(&state, &room_id, &token).await?;
+
+    let manifest: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT manifest_json FROM room_manifests WHERE room_id = $1 ORDER BY revision DESC LIMIT 1",
+    )
+    .bind(&room_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let Some(manifest_json) = manifest else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No manifest has been published for room '{room_id}' yet"),
+                code: "NO_MANIFEST".to_string(),
+                details: None,
+            }),
+        ));
+    };
+
+    Ok(Json(manifest_json))
+}
+
+/// Retrieve a specific revision manifest for the room.
+pub async fn get_revision_manifest(
+    State(state): State<AppState>,
+    Path((room_id, revision)): Path<(String, i64)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+    verify_room_authorization(&state, &room_id, &token).await?;
+
+    let manifest: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT manifest_json FROM room_manifests WHERE room_id = $1 AND revision = $2",
+    )
+    .bind(&room_id)
+    .bind(revision)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let Some(manifest_json) = manifest else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Manifest revision {revision} not found for room '{room_id}'"),
+                code: "MANIFEST_REVISION_NOT_FOUND".to_string(),
+                details: None,
+            }),
+        ));
+    };
+
+    Ok(Json(manifest_json))
+}
+
+/// Acknowledge synchronization state for a verified revision.
+pub async fn ack_revision(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<AckRevisionRequest>,
+) -> Result<Json<AckRevisionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+
+    let member: Option<(String, String)> = sqlx::query_as(
+        "SELECT member_id, role FROM room_members WHERE room_id = $1 AND member_token = $2 \
+         UNION \
+         SELECT member_id, 'owner' as role FROM room_members rm JOIN rooms r ON rm.room_id = r.room_id \
+         WHERE r.room_id = $1 AND r.owner_token = $2 LIMIT 1",
+    )
+    .bind(&room_id)
+    .bind(&token)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let Some((member_id, _role)) = member else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid token for this room".to_string(),
+                code: "UNAUTHORIZED".to_string(),
+                details: None,
+            }),
+        ));
+    };
+
+    let status = payload.status.unwrap_or_else(|| "synchronized".to_string());
+
+    sqlx::query(
+        "UPDATE room_members \
+         SET last_acknowledged_revision = $1, ack_status = $2, last_seen_at = NOW() \
+         WHERE room_id = $3 AND member_id = $4",
+    )
+    .bind(payload.revision)
+    .bind(&status)
+    .bind(&room_id)
+    .bind(&member_id)
+    .execute(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let _ = sqlx::query("UPDATE rooms SET expires_at = NOW() + INTERVAL '24 hours' WHERE room_id = $1")
+        .bind(&room_id)
+        .execute(&state.db)
+        .await;
+
+    let channel = state.get_or_create_room_channel(&room_id).await;
+    let _ = channel.send(RoomEvent {
+        room_id: room_id.clone(),
+        event_type: "member_acknowledged".to_string(),
+        payload: serde_json::json!({
+            "room_id": room_id,
+            "member_id": member_id,
+            "revision": payload.revision,
+            "status": status,
+        }),
+    });
+
+    info!(
+        room_id = %room_id,
+        member_id = %member_id,
+        revision = payload.revision,
+        status = %status,
+        "Member acknowledged revision"
+    );
+
+    Ok(Json(AckRevisionResponse {
+        success: true,
+        member_id,
+        revision: payload.revision,
+        status,
+    }))
+}
+
+/// Retrieve all members of a room, their roles, synchronization statuses, and presence.
+pub async fn get_room_members(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<MemberInfo>>, (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+    verify_room_authorization(&state, &room_id, &token).await?;
+
+    let members: Vec<(
+        String,
+        String,
+        i64,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT member_id, role, last_acknowledged_revision, ack_status, joined_at, last_seen_at \
+         FROM room_members \
+         WHERE room_id = $1 \
+         ORDER BY (role = 'owner') DESC, joined_at ASC",
+    )
+    .bind(&room_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let mut result = Vec::with_capacity(members.len());
+    let now = chrono::Utc::now();
+    let stale_threshold = chrono::Duration::minutes(5);
+
+    for (member_id, role, last_ack, ack_status, joined_at, last_seen_at) in members {
+        let is_connected = state.is_member_connected(&room_id, &member_id).await;
+        let is_recent = (now - last_seen_at) < stale_threshold;
+        let is_online = is_connected || is_recent;
+
+        result.push(MemberInfo {
+            member_id,
+            role,
+            last_acknowledged_revision: last_ack,
+            ack_status,
+            joined_at,
+            last_seen_at,
+            is_online,
+            is_stale: !is_online,
+        });
+    }
+
+    Ok(Json(result))
+}
+
+/// Transfer room ownership atomically to another active member.
+/// Only the current owner can perform this operation.
+pub async fn transfer_ownership(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<TransferOwnerRequest>,
+) -> Result<Json<TransferOwnerResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+
+    let owner_info: Option<(String, String)> = sqlx::query_as(
+        "SELECT r.owner_token, rm.member_id FROM rooms r \
+         JOIN room_members rm ON r.room_id = rm.room_id AND rm.role = 'owner' \
+         WHERE r.room_id = $1",
+    )
+    .bind(&room_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let Some((owner_token, current_owner_id)) = owner_info else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Room '{room_id}' not found"),
+                code: "ROOM_NOT_FOUND".to_string(),
+                details: None,
+            }),
+        ));
+    };
+
+    if owner_token != token {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only the current room owner can transfer ownership".to_string(),
+                code: "NOT_ROOM_OWNER".to_string(),
+                details: None,
+            }),
+        ));
+    }
+
+    if payload.new_owner_member_id == current_owner_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Target member is already the owner of this room".to_string(),
+                code: "ALREADY_OWNER".to_string(),
+                details: None,
+            }),
+        ));
+    }
+
+    let target_token: Option<String> = sqlx::query_scalar(
+        "SELECT member_token FROM room_members WHERE room_id = $1 AND member_id = $2",
+    )
+    .bind(&room_id)
+    .bind(&payload.new_owner_member_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let Some(new_owner_token) = target_token else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Target member '{}' not found in room", payload.new_owner_member_id),
+                code: "MEMBER_NOT_FOUND".to_string(),
+                details: None,
+            }),
+        ));
+    };
+
+    let mut tx = state.db.begin().await.map_err(db_error)?;
+
+    // 1. Assign target member's token as the room's owner_token
+    sqlx::query("UPDATE rooms SET owner_token = $1, updated_at = NOW() WHERE room_id = $2")
+        .bind(&new_owner_token)
+        .bind(&room_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+
+    // 2. Set target member's role to 'owner'
+    sqlx::query("UPDATE room_members SET role = 'owner' WHERE room_id = $1 AND member_id = $2")
+        .bind(&room_id)
+        .bind(&payload.new_owner_member_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+
+    // 3. Set previous owner's role to 'member'
+    sqlx::query("UPDATE room_members SET role = 'member' WHERE room_id = $1 AND member_id = $2")
+        .bind(&room_id)
+        .bind(&current_owner_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+
+    tx.commit().await.map_err(db_error)?;
+
+    let channel = state.get_or_create_room_channel(&room_id).await;
+    let _ = channel.send(RoomEvent {
+        room_id: room_id.clone(),
+        event_type: "owner_transferred".to_string(),
+        payload: serde_json::json!({
+            "room_id": room_id,
+            "previous_owner": current_owner_id,
+            "new_owner": payload.new_owner_member_id,
+        }),
+    });
+
+    info!(
+        room_id = %room_id,
+        previous_owner = %current_owner_id,
+        new_owner = %payload.new_owner_member_id,
+        "Ownership transferred successfully"
+    );
+
+    Ok(Json(TransferOwnerResponse {
+        success: true,
+        room_id,
+        previous_owner: current_owner_id,
+        new_owner: payload.new_owner_member_id,
+    }))
+}
+
+async fn verify_room_authorization(
+    state: &AppState,
+    room_id: &str,
+    token: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let is_owner: Option<bool> =
+        sqlx::query_scalar("SELECT (owner_token = $1) FROM rooms WHERE room_id = $2")
+            .bind(token)
+            .bind(room_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(db_error)?;
+
+    let is_member: Option<bool> = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM room_members WHERE room_id = $1 AND member_token = $2)",
+    )
+    .bind(room_id)
+    .bind(token)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    if is_owner.unwrap_or(false) || is_member.unwrap_or(false) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid or missing token for this room".to_string(),
+                code: "UNAUTHORIZED".to_string(),
+                details: None,
+            }),
+        ))
+    }
+}
+
+pub fn extract_token(headers: &HeaderMap) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let Some(auth_header) = headers.get("Authorization") else {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -400,4 +989,3 @@ fn extract_client_ip(headers: &HeaderMap) -> std::net::IpAddr {
         })
         .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
-
