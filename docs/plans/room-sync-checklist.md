@@ -93,16 +93,22 @@ by the user.
       accepted or persisted, and remote member rows are never simulated. Durable local preparation
       and non-active profile bindings drive the workflow status after restart.
 
-12. [ ] Create the server foundation.
+12. [x] Create the server foundation.
     - Rust service using Axum, Tokio, Tower, SQLx, and PostgreSQL.
     - Versioned HTTPS endpoints plus authenticated WebSocket events.
     - Database migrations, health/readiness endpoints, structured errors, and graceful shutdown.
+    - Implemented in `services/room-server` containerized via Docker Compose with PostgreSQL 16
+      Alpine, automatic migrations, health and readiness endpoints, and deployed live to the Ubuntu VPS
+      at `http://177.153.59.168:3000`. Fully documented in `docs/ops/server-runbook.md`.
 
-13. [ ] Implement room authentication and roles.
+13. [x] Implement room authentication and roles.
     - Hash room passwords with Argon2id and rate-limit join attempts.
     - Use separate high-entropy member and owner tokens with short-lived sessions.
     - Roles: owner and member; only the owner may publish a new manifest revision.
     - Do not request or store Riot credentials.
+    - Implemented in `services/room-server` with Argon2id password hashing, 256-bit CSPRNG tokens,
+      in-memory sliding window rate limiting (5 attempts/min -> 429), `POST /v1/rooms`, `POST /v1/rooms/:id/join`,
+      authenticated metadata query, and WebSocket token verification. Tested and live on VPS.
 
 14. [ ] Implement authoritative revisions and presence.
     - Monotonic revisions with compare-and-swap updates to prevent two writers from racing.

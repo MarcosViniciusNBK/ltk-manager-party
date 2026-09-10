@@ -1,5 +1,6 @@
 [workspace]
 members = ["src-tauri", "crates/ltk-manager-core", "crates/ltk-telemetry"]
+exclude = ["services/room-server"]
 resolver = "2"
 
 # Dependencies only, so our own crates stay debuggable. A debug build parses
