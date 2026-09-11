@@ -113,8 +113,8 @@ export const commands = {
 	 *  next start.
 	 */
 	switchLeagueInstall: (installRoot: string) => __TAURI_INVOKE<({ ok: true; value: null }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("switch_league_install", { installRoot }),
-	/**  Create a new online room on the authoritative room server. */
-	createRemoteRoom: (roomId: string, password: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("create_remote_room", { roomId, password }),
+	/**  Create a room from a profile and materialize its collaborative profile locally. */
+	createRemoteRoom: (roomId: string, password: string, profileId: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("create_remote_room", { roomId, password, profileId }),
 	/**  Join an existing online room on the authoritative room server. */
 	joinRemoteRoom: (roomId: string, password: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("join_remote_room", { roomId, password }),
 	/**  Retrieve active members and synchronization state from the server. */
@@ -1385,4 +1385,3 @@ export type Verdict_Serialize = {
 export type WorkshopError = 
 /**  One or more files already exist in the target layer directory. */
 { kind: "LAYER_FILE_CONFLICT"; conflicts: string[] };
-

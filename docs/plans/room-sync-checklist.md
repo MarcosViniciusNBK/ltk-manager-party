@@ -1,9 +1,10 @@
 # Room synchronization checklist
 
-The room feature synchronizes immutable mod files and an optional profile suggestion. It does not
-create a VPN, alter League files, build an overlay, start the patcher, switch the active profile, or
-launch the game. Every action that prepares or applies synchronized mods remains local and initiated
-by the user.
+The room feature synchronizes immutable mod files and one collaborative profile. Creating a room
+associates an initial local profile; joining and later revisions automatically materialize the
+dedicated room profile on every member. It does not create a VPN, alter League files, build an
+overlay, start the patcher, switch the active profile, or launch the game. Applying synchronized
+mods remains local and initiated by the user. See ADR 0041.
 
 ## End-to-end checklist
 
@@ -56,22 +57,22 @@ by the user.
      recovery, explicit transition errors, and local length/SHA-256 re-verification documented in
      ADR-0037.
 
-8. [x] Implement explicit local preparation/import.
-   - Provide a user action to prepare a synchronized revision in the local library.
+8. [x] Implement automatic local preparation/import for accepted room revisions.
+   - Prepare a verified room revision automatically without selecting or applying it.
    - Reuse the existing staging and archive validation pipeline.
    - Map shared content hashes to local UUIDs without assuming IDs match across machines.
    - Do not automatically enable mods, switch profiles, rebuild overlays, or start the patcher.
    - Implemented with accepted-manifest persistence, verified extensionless-cache imports, disabled
-     registration in every profile, durable SHA-256-to-local-UUID mappings, and idempotent recovery
-     documented in ADR-0038.
+     registration, durable SHA-256-to-local-UUID mappings, and idempotent recovery. ADR-0038 is
+     superseded by ADR-0041 for room-triggered preparation.
 
 9. [x] Add a dedicated room profile workflow.
-   - Create/update a non-active room profile transactionally after explicit user confirmation.
+   - Create/update a dedicated room profile transactionally after every accepted revision.
    - Preserve exact mod order and suggested layer states.
    - Let the user select that profile and press the existing Start/Play control themselves.
    - Implemented with a durable room-to-profile binding, a recoverable per-profile room marker,
-     pinned manifest order, complete layer maps, active-profile update protection, and the decision
-     recorded in ADR-0039.
+     pinned manifest order, complete layer maps, and library-only updates even if that profile is
+     selected. ADR-0039 is superseded by ADR-0041.
 
 10. [x] Add Tauri commands, backend events, and permissions.
 
@@ -86,25 +87,24 @@ by the user.
 11. [x] Build the room user interface.
     - Create/join by room code and password.
     - Show members, manifest revision, per-member synchronization status, files, size, and progress.
-    - Clearly distinguish `Synchronized`, `Prepared in library`, and `Applied by Start/Play`.
-    - Require a local click for all preparation/import actions.
-    - Implemented the `/rooms` workspace with a truthful local-draft state while the authenticated
-      service is still pending in steps 12-13: the password field remains disabled, no credential is
-      accepted or persisted, and remote member rows are never simulated. Durable local preparation
-      and non-active profile bindings drive the workflow status after restart.
+    - Present one automatic synchronization state while keeping Start/Play visibly separate.
+    - Implemented the `/rooms` workspace with Create/Join modes, initial profile selection,
+      automatic materialization, recovery for an interrupted initial publication, shared files,
+      member status, and a direct link to the existing Mods flow.
 
-12. [x] Create the server foundation.
-    - Rust service using Axum, Tokio, Tower, SQLx, and PostgreSQL.
-    - Versioned HTTPS endpoints plus authenticated WebSocket events.
+12. [ ] Create the server foundation and secure its public transport.
+    - Rust service using Axum, Tokio, Tower, SQLx, and PostgreSQL is complete.
+    - Versioned HTTP/WebSocket endpoints are live; a trusted TLS hostname/reverse proxy is still
+      required before public use.
     - Database migrations, health/readiness endpoints, structured errors, and graceful shutdown.
     - Implemented in `services/room-server` containerized via Docker Compose with PostgreSQL 16
-      Alpine, automatic migrations, health and readiness endpoints, and deployed live to the Ubuntu VPS
-      at `http://177.153.59.168:3000`. Fully documented in `docs/ops/server-runbook.md`.
+      Alpine, automatic migrations, health and readiness endpoints, and deployed live to the Ubuntu
+      VPS at `http://177.153.59.168:3000`. This IP endpoint is for private validation only.
 
 13. [x] Implement room authentication and roles.
     - Hash room passwords with Argon2id and rate-limit join attempts.
-    - Use separate high-entropy member and owner tokens with short-lived sessions.
-    - Roles: owner and member; only the owner may publish a new manifest revision.
+    - Use separate high-entropy member and owner tokens scoped to the room lifetime.
+    - Roles: owner and member; every authenticated member may update the collaborative profile.
     - Do not request or store Riot credentials.
     - Implemented in `services/room-server` with Argon2id password hashing, 256-bit CSPRNG tokens,
       in-memory sliding window rate limiting (5 attempts/min -> 429), `POST /v1/rooms`, `POST /v1/rooms/:id/join`,
@@ -122,8 +122,10 @@ by the user.
       and migration 000003. Tested live on VPS at `http://177.153.59.168:3000`.
 
 15. [x] Integrate content-addressed object storage.
-    - S3-compatible storage with short-lived signed upload/download URLs.
-    - Upload only missing hashes; download through HTTPS rather than WebSocket.
+    - Persistent local CAS with short-lived signed upload/download URLs and an S3-compatible adapter
+      left as an optional future scaling path.
+    - Upload only missing hashes; transfer over HTTP during private validation and require HTTPS
+      before public use.
     - Quotas, retention, orphan cleanup, and optional CDN delivery.
     - Implemented with persistent Content-Addressed Storage (`/data/blobs/objects` and `partial`),
       HMAC-SHA256 signed grants for upload (30m) and download (60m), `POST /v1/rooms/:id/blobs/check`
@@ -132,7 +134,7 @@ by the user.
       resumable download with HTTP `Range` (`206 Partial Content`), 5 GB quota per room, automated
       orphan cleanup background worker, and migration 000004. Tested live on VPS at `http://177.153.59.168:3000`.
 
-16. [x] Enforce server and client authorization.
+16. [x] Enforce server and client authorization at the application layer.
     - A member can access only blobs referenced by a room they have joined.
     - Prevent arbitrary remote URLs, SSRF, path injection, cross-room blob enumeration, and replay of
       expired upload grants.
@@ -144,7 +146,8 @@ by the user.
       (room sync manifests strictly isolated to room-scoped staging and cannot modify active profile, patcher,
       or launcher), privacy-preserving audit logging (`room_audit_logs` table via migration 000005, structured
       `record_audit_event` and `sanitize_value` redacting passwords, tokens, and filesystem paths, queryable via
-      `GET /v1/rooms/:id/audit`). Fully verified with live VPS tests at `http://177.153.59.168:3000`.
+      `GET /v1/rooms/:id/audit`). Verified with live VPS tests; transport confidentiality remains
+      gated on item 12.
 
 17. [ ] Harden untrusted file handling.
     - Allow only supported archive formats and reject empty, oversized, malformed, or ambiguous

@@ -47,11 +47,6 @@ impl ModLibrary {
                 .collect();
 
             let profile = if let Some(position) = find_room_profile(index, storage_dir, room_id) {
-                if index.profiles[position].id == index.active_profile_id {
-                    return Err(AppError::ValidationFailed(
-                        "Select another profile before updating this room profile".to_string(),
-                    ));
-                }
                 let profile = &mut index.profiles[position];
                 profile.order_mode = ProfileOrderMode::RoomPinned;
                 profile.mod_order = mod_order.clone();
@@ -275,7 +270,10 @@ impl ModLibrary {
         &self,
         config: &Config,
         profile_id: Option<&str>,
-    ) -> AppResult<(Profile, Vec<(std::path::PathBuf, crate::room_sync::RoomMod)>)> {
+    ) -> AppResult<(
+        Profile,
+        Vec<(std::path::PathBuf, crate::room_sync::RoomMod)>,
+    )> {
         self.with_index(config, |storage_dir, index| {
             let profile = match profile_id {
                 Some(id) => get_profile_by_id(index, id)?,
@@ -284,30 +282,47 @@ impl ModLibrary {
 
             let mut artifacts = Vec::new();
             for mod_id in &profile.enabled_mods {
-                let Some(entry) = index.mods.iter().find(|e| e.id == *mod_id) else {
-                    continue;
-                };
+                let entry = index
+                    .mods
+                    .iter()
+                    .find(|entry| entry.id == *mod_id)
+                    .ok_or_else(|| AppError::ModNotFound(mod_id.clone()))?;
 
                 let archive_path = entry.archive_path(storage_dir);
                 if !archive_path.is_file() {
-                    continue;
+                    return Err(AppError::InvalidPath(format!(
+                        "Enabled mod archive is missing and cannot be shared: {mod_id}"
+                    )));
                 }
 
                 let room_format = match entry.format {
-                    crate::mods::ModArchiveFormat::Modpkg => crate::room_sync::RoomModFormat::Modpkg,
-                    crate::mods::ModArchiveFormat::Fantome => crate::room_sync::RoomModFormat::Fantome,
-                    _ => continue,
-                };
-
-                let artifact = match crate::room_sync::CanonicalRoomArtifact::from_file(&archive_path, room_format) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::warn!("Skipping mod {} for room export: {:?}", mod_id, e);
-                        continue;
+                    crate::mods::ModArchiveFormat::Modpkg => {
+                        crate::room_sync::RoomModFormat::Modpkg
+                    }
+                    crate::mods::ModArchiveFormat::Fantome => {
+                        crate::room_sync::RoomModFormat::Fantome
+                    }
+                    crate::mods::ModArchiveFormat::Unknown => {
+                        return Err(AppError::ValidationFailed(format!(
+                            "Enabled mod has no shareable archive format: {mod_id}"
+                        )));
                     }
                 };
 
-                let installed = crate::mods::archive::metadata::read_installed_mod(entry, false, storage_dir, None);
+                let artifact =
+                    crate::room_sync::CanonicalRoomArtifact::from_file(&archive_path, room_format)
+                        .map_err(|error| {
+                            AppError::ValidationFailed(format!(
+                                "Enabled mod cannot be shared ({mod_id}): {error}"
+                            ))
+                        })?;
+
+                let installed = crate::mods::archive::metadata::read_installed_mod(
+                    entry,
+                    false,
+                    storage_dir,
+                    None,
+                );
                 let display_name = installed
                     .as_ref()
                     .map(|m| m.display_name.clone())
@@ -323,7 +338,9 @@ impl ModLibrary {
                     .map(|layers| {
                         layers
                             .iter()
-                            .filter_map(|(name, enabled)| if *enabled { Some(name.clone()) } else { None })
+                            .filter_map(
+                                |(name, enabled)| if *enabled { Some(name.clone()) } else { None },
+                            )
                             .collect()
                     })
                     .unwrap_or_default();

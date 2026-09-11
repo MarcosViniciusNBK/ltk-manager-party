@@ -26,6 +26,7 @@ export const roomQueries = {
       queryKey: roomKeys.snapshot(roomId),
       queryFn: queryFnWithArgs(api.rooms.snapshot, roomId),
       enabled: roomId.length > 0,
+      refetchInterval: 4000,
     }),
 
   manifest: (roomId: string) =>
@@ -33,6 +34,7 @@ export const roomQueries = {
       queryKey: roomKeys.manifest(roomId),
       queryFn: queryFnWithArgs(api.rooms.acceptedManifest, roomId),
       enabled: roomId.length > 0,
+      refetchInterval: 4000,
     }),
 
   localStatus: (roomId: string) =>
@@ -40,6 +42,7 @@ export const roomQueries = {
       queryKey: roomKeys.localStatus(roomId),
       queryFn: queryFnWithArgs(api.rooms.localStatus, roomId),
       enabled: roomId.length > 0,
+      refetchInterval: 4000,
     }),
 
   remoteMembers: (roomId: string) =>

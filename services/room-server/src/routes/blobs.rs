@@ -1,12 +1,16 @@
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::header::{HeaderMap, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG};
+use axum::http::header::{
+    HeaderMap, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE,
+    ETAG,
+};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 use tracing::info;
 
 use crate::audit::record_audit_event;
@@ -112,7 +116,9 @@ pub async fn request_upload_url(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: format!("Invalid size_bytes: must be between 1 and {MAX_BLOB_SIZE_BYTES} bytes"),
+                error: format!(
+                    "Invalid size_bytes: must be between 1 and {MAX_BLOB_SIZE_BYTES} bytes"
+                ),
                 code: "INVALID_SIZE".to_string(),
                 details: None,
             }),
@@ -131,6 +137,25 @@ pub async fn request_upload_url(
         ));
     }
 
+    let existing_metadata: Option<(i64, String)> =
+        sqlx::query_as("SELECT size_bytes, format FROM room_blobs WHERE content_hash = $1")
+            .bind(&clean_hash)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(blob_db_error)?;
+    if let Some((existing_size, existing_format)) = &existing_metadata {
+        if *existing_size != payload.size_bytes as i64 || existing_format != &format {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "Existing content hash has different immutable metadata".to_string(),
+                    code: "BLOB_METADATA_MISMATCH".to_string(),
+                    details: None,
+                }),
+            ));
+        }
+    }
+
     // Quota check per room
     let current_room_bytes: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(size_bytes), 0) FROM room_blobs WHERE uploaded_by_room_id = $1",
@@ -140,7 +165,12 @@ pub async fn request_upload_url(
     .await
     .unwrap_or(0);
 
-    if (current_room_bytes as u64) + payload.size_bytes > state.storage.room_quota_bytes() {
+    let additional_bytes = if existing_metadata.is_some() {
+        0
+    } else {
+        payload.size_bytes
+    };
+    if (current_room_bytes as u64) + additional_bytes > state.storage.room_quota_bytes() {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
             Json(ErrorResponse {
@@ -152,6 +182,30 @@ pub async fn request_upload_url(
     }
 
     let (upload_url, expires_at) = state.storage.build_upload_url(&room_id, &clean_hash);
+
+    // Persist the declared immutable-object metadata before issuing the grant. The upload URL
+    // deliberately contains no user-controlled format field.
+    sqlx::query(
+        "INSERT INTO room_blobs (content_hash, size_bytes, format, storage_path, uploaded_by_room_id, created_at, last_accessed_at) \
+         VALUES ($1, $2, $3, NULL, $4, NOW(), NOW()) \
+         ON CONFLICT (content_hash) DO UPDATE SET last_accessed_at = NOW()",
+    )
+    .bind(&clean_hash)
+    .bind(payload.size_bytes as i64)
+    .bind(&format)
+    .bind(&room_id)
+    .execute(&state.db)
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to reserve blob metadata".to_string(),
+                code: "DATABASE_ERROR".to_string(),
+                details: Some(error.to_string()),
+            }),
+        )
+    })?;
 
     record_audit_event(
         &state.db,
@@ -226,7 +280,8 @@ pub async fn request_download_url(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Access denied: this blob is not referenced by any manifest in this room".to_string(),
+                error: "Access denied: this blob is not referenced by any manifest in this room"
+                    .to_string(),
                 code: "BLOB_NOT_IN_ROOM".to_string(),
                 details: None,
             }),
@@ -266,7 +321,10 @@ pub async fn probe_upload_blob(
     let grant = query.grant.unwrap_or_default();
     let expires = query.expires.unwrap_or(0);
 
-    if !state.storage.verify_grant(&room_id, &clean_hash, "upload", expires, &grant) {
+    if !state
+        .storage
+        .verify_grant(&room_id, &clean_hash, "upload", expires, &grant)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -282,13 +340,28 @@ pub async fn probe_upload_blob(
 
     if state.storage.blob_exists(&clean_hash) {
         let size = state.storage.blob_size(&clean_hash).unwrap_or(0);
-        headers.insert("Upload-Offset", HeaderValue::from_str(&size.to_string()).unwrap());
-        headers.insert("X-Content-SHA256", HeaderValue::from_str(&clean_hash).unwrap());
-        headers.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
+        headers.insert(
+            "Upload-Offset",
+            HeaderValue::from_str(&size.to_string()).unwrap(),
+        );
+        headers.insert(
+            "X-Content-SHA256",
+            HeaderValue::from_str(&clean_hash).unwrap(),
+        );
+        headers.insert(
+            ETAG,
+            HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+        );
     } else {
         let offset = state.storage.partial_offset(&clean_hash);
-        headers.insert("Upload-Offset", HeaderValue::from_str(&offset.to_string()).unwrap());
-        headers.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
+        headers.insert(
+            "Upload-Offset",
+            HeaderValue::from_str(&offset.to_string()).unwrap(),
+        );
+        headers.insert(
+            ETAG,
+            HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+        );
     }
 
     Ok(res)
@@ -300,14 +373,17 @@ pub async fn put_upload_blob(
     Path(content_hash): Path<String>,
     Query(query): Query<TransferGrantQuery>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let clean_hash = content_hash.trim().to_lowercase();
     let room_id = query.room_id.unwrap_or_default();
     let grant = query.grant.unwrap_or_default();
     let expires = query.expires.unwrap_or(0);
 
-    if !state.storage.verify_grant(&room_id, &clean_hash, "upload", expires, &grant) {
+    if !state
+        .storage
+        .verify_grant(&room_id, &clean_hash, "upload", expires, &grant)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -318,30 +394,108 @@ pub async fn put_upload_blob(
         ));
     }
 
+    let _upload_guard = state.lock_upload(&clean_hash).await;
+
     // Idempotent: if already complete and verified, do not rewrite
     if state.storage.blob_exists(&clean_hash) {
+        let blob_path = state.storage.blob_path(&clean_hash);
+        let size = state.storage.blob_size(&clean_hash).unwrap_or_default();
+        sqlx::query(
+            "UPDATE room_blobs SET size_bytes = $1, storage_path = $2, \
+             uploaded_by_room_id = COALESCE(uploaded_by_room_id, $3), last_accessed_at = NOW() \
+             WHERE content_hash = $4",
+        )
+        .bind(size as i64)
+        .bind(blob_path.to_string_lossy().to_string())
+        .bind(&room_id)
+        .bind(&clean_hash)
+        .execute(&state.db)
+        .await
+        .map_err(blob_db_error)?;
         let mut res = StatusCode::OK.into_response();
         let h = res.headers_mut();
-        h.insert("X-Content-SHA256", HeaderValue::from_str(&clean_hash).unwrap());
-        h.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
+        h.insert(
+            "X-Content-SHA256",
+            HeaderValue::from_str(&clean_hash).unwrap(),
+        );
+        h.insert(
+            ETAG,
+            HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+        );
         return Ok(res);
     }
 
-    let (offset, total_size) = parse_content_range(&headers, body.len() as u64)?;
+    let content_length = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| bad_request("CONTENT_LENGTH_REQUIRED", "Content-Length is required"))?;
+    let (offset, total_size) = parse_content_range(&headers, content_length)?;
+    let end_exclusive = offset.checked_add(content_length).ok_or_else(|| {
+        bad_request(
+            "INVALID_UPLOAD_RANGE",
+            "Upload range exceeds integer limits",
+        )
+    })?;
+    if content_length == 0
+        || total_size == 0
+        || total_size > MAX_BLOB_SIZE_BYTES
+        || end_exclusive > total_size
+    {
+        return Err(bad_request(
+            "INVALID_UPLOAD_RANGE",
+            "Upload range exceeds the allowed blob size",
+        ));
+    }
 
-    state
-        .storage
-        .write_partial_chunk(&clean_hash, offset, &body)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to write chunk to storage: {e}"),
-                    code: "STORAGE_IO_ERROR".to_string(),
-                    details: None,
-                }),
+    let expected_offset = state.storage.partial_offset(&clean_hash);
+    if offset != expected_offset {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!("Upload must resume at byte {expected_offset}"),
+                code: "UPLOAD_OFFSET_MISMATCH".to_string(),
+                details: Some(expected_offset.to_string()),
+            }),
+        ));
+    }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(state.storage.partial_path(&clean_hash))
+        .await
+        .map_err(storage_io_error)?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(storage_io_error)?;
+
+    let mut stream = body.into_data_stream();
+    let mut received = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            bad_request(
+                "INVALID_UPLOAD_BODY",
+                &format!("Could not read upload body: {error}"),
             )
         })?;
+        received = received.saturating_add(chunk.len() as u64);
+        if received > content_length {
+            return Err(bad_request(
+                "UPLOAD_TOO_LARGE",
+                "Upload body exceeded Content-Length",
+            ));
+        }
+        file.write_all(&chunk).await.map_err(storage_io_error)?;
+    }
+    if received != content_length {
+        return Err(bad_request(
+            "UPLOAD_SIZE_MISMATCH",
+            "Upload body did not match Content-Length",
+        ));
+    }
+    file.sync_data().await.map_err(storage_io_error)?;
+    drop(file);
 
     let current_partial_len = state.storage.partial_offset(&clean_hash);
 
@@ -360,17 +514,19 @@ pub async fn put_upload_blob(
                 )
             })?;
 
-        let _ = sqlx::query(
+        sqlx::query(
             "INSERT INTO room_blobs (content_hash, size_bytes, format, storage_path, uploaded_by_room_id, created_at, last_accessed_at) \
-             VALUES ($1, $2, 'modpkg', $3, $4, NOW(), NOW()) \
-             ON CONFLICT (content_hash) DO UPDATE SET last_accessed_at = NOW()",
+             VALUES ($1, $2, COALESCE((SELECT format FROM room_blobs WHERE content_hash = $1), 'modpkg'), $3, $4, NOW(), NOW()) \
+             ON CONFLICT (content_hash) DO UPDATE SET size_bytes = EXCLUDED.size_bytes, storage_path = EXCLUDED.storage_path, \
+             uploaded_by_room_id = COALESCE(room_blobs.uploaded_by_room_id, EXCLUDED.uploaded_by_room_id), last_accessed_at = NOW()",
         )
         .bind(&clean_hash)
         .bind(total_size as i64)
         .bind(blob_path.to_string_lossy().to_string())
         .bind(&room_id)
         .execute(&state.db)
-        .await;
+        .await
+        .map_err(blob_db_error)?;
 
         record_audit_event(
             &state.db,
@@ -390,14 +546,26 @@ pub async fn put_upload_blob(
 
         let mut res = StatusCode::OK.into_response();
         let h = res.headers_mut();
-        h.insert("X-Content-SHA256", HeaderValue::from_str(&clean_hash).unwrap());
-        h.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
+        h.insert(
+            "X-Content-SHA256",
+            HeaderValue::from_str(&clean_hash).unwrap(),
+        );
+        h.insert(
+            ETAG,
+            HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+        );
         Ok(res)
     } else {
         let mut res = StatusCode::PARTIAL_CONTENT.into_response();
         let h = res.headers_mut();
-        h.insert("Upload-Offset", HeaderValue::from_str(&current_partial_len.to_string()).unwrap());
-        h.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
+        h.insert(
+            "Upload-Offset",
+            HeaderValue::from_str(&current_partial_len.to_string()).unwrap(),
+        );
+        h.insert(
+            ETAG,
+            HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+        );
         Ok(res)
     }
 }
@@ -413,7 +581,10 @@ pub async fn probe_download_blob(
     let grant = query.grant.unwrap_or_default();
     let expires = query.expires.unwrap_or(0);
 
-    if !state.storage.verify_grant(&room_id, &clean_hash, "download", expires, &grant) {
+    if !state
+        .storage
+        .verify_grant(&room_id, &clean_hash, "download", expires, &grant)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -437,10 +608,19 @@ pub async fn probe_download_blob(
 
     let mut res = StatusCode::OK.into_response();
     let h = res.headers_mut();
-    h.insert(CONTENT_LENGTH, HeaderValue::from_str(&size.to_string()).unwrap());
+    h.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&size.to_string()).unwrap(),
+    );
     h.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    h.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
-    h.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        ETAG,
+        HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+    );
+    h.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
 
     Ok(res)
 }
@@ -457,7 +637,10 @@ pub async fn get_download_blob(
     let grant = query.grant.unwrap_or_default();
     let expires = query.expires.unwrap_or(0);
 
-    if !state.storage.verify_grant(&room_id, &clean_hash, "download", expires, &grant) {
+    if !state
+        .storage
+        .verify_grant(&room_id, &clean_hash, "download", expires, &grant)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
@@ -469,7 +652,7 @@ pub async fn get_download_blob(
     }
 
     let file_path = state.storage.blob_path(&clean_hash);
-    let mut file = File::open(&file_path).map_err(|_| {
+    let mut file = tokio::fs::File::open(&file_path).await.map_err(|_| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -480,16 +663,20 @@ pub async fn get_download_blob(
         )
     })?;
 
-    let total_size = file.metadata().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to read blob metadata: {e}"),
-                code: "IO_ERROR".to_string(),
-                details: None,
-            }),
-        )
-    })?.len();
+    let total_size = file
+        .metadata()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read blob metadata: {e}"),
+                    code: "IO_ERROR".to_string(),
+                    details: None,
+                }),
+            )
+        })?
+        .len();
 
     let _ = sqlx::query("UPDATE room_blobs SET last_accessed_at = NOW() WHERE content_hash = $1")
         .bind(&clean_hash)
@@ -509,63 +696,64 @@ pub async fn get_download_blob(
                 let end = end.min(total_size - 1);
                 if start <= end {
                     let length = end - start + 1;
-                    file.seek(SeekFrom::Start(start)).map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: format!("Seek failed: {e}"),
-                                code: "IO_ERROR".to_string(),
-                                details: None,
-                            }),
-                        )
-                    })?;
+                    file.seek(std::io::SeekFrom::Start(start))
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(ErrorResponse {
+                                    error: format!("Seek failed: {e}"),
+                                    code: "IO_ERROR".to_string(),
+                                    details: None,
+                                }),
+                            )
+                        })?;
 
-                    let mut buffer = vec![0u8; length as usize];
-                    file.read_exact(&mut buffer).map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: format!("Read range failed: {e}"),
-                                code: "IO_ERROR".to_string(),
-                                details: None,
-                            }),
-                        )
-                    })?;
-
-                    let mut res = (StatusCode::PARTIAL_CONTENT, Bytes::from(buffer)).into_response();
+                    let stream = ReaderStream::new(file.take(length));
+                    let mut res = Response::new(Body::from_stream(stream));
+                    *res.status_mut() = StatusCode::PARTIAL_CONTENT;
                     let h = res.headers_mut();
                     h.insert(
                         CONTENT_RANGE,
-                        HeaderValue::from_str(&format!("bytes {start}-{end}/{total_size}")).unwrap(),
+                        HeaderValue::from_str(&format!("bytes {start}-{end}/{total_size}"))
+                            .unwrap(),
                     );
-                    h.insert(CONTENT_LENGTH, HeaderValue::from_str(&length.to_string()).unwrap());
+                    h.insert(
+                        CONTENT_LENGTH,
+                        HeaderValue::from_str(&length.to_string()).unwrap(),
+                    );
                     h.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-                    h.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
-                    h.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+                    h.insert(
+                        ETAG,
+                        HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+                    );
+                    h.insert(
+                        CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    );
                     return Ok(res);
                 }
             }
         }
     }
 
-    let mut buffer = Vec::with_capacity(total_size as usize);
-    file.read_to_end(&mut buffer).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Read error: {e}"),
-                code: "IO_ERROR".to_string(),
-                details: None,
-            }),
-        )
-    })?;
-
-    let mut res = (StatusCode::OK, Bytes::from(buffer)).into_response();
+    let stream = ReaderStream::new(file);
+    let mut res = Response::new(Body::from_stream(stream));
+    *res.status_mut() = StatusCode::OK;
     let h = res.headers_mut();
-    h.insert(CONTENT_LENGTH, HeaderValue::from_str(&total_size.to_string()).unwrap());
+    h.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&total_size.to_string()).unwrap(),
+    );
     h.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    h.insert(ETAG, HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap());
-    h.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        ETAG,
+        HeaderValue::from_str(&format!("\"{clean_hash}\"")).unwrap(),
+    );
+    h.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
     h.insert(
         CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("attachment; filename=\"{clean_hash}.bin\"")).unwrap(),
@@ -574,22 +762,76 @@ pub async fn get_download_blob(
     Ok(res)
 }
 
-fn parse_content_range(headers: &HeaderMap, body_len: u64) -> Result<(u64, u64), (StatusCode, Json<ErrorResponse>)> {
+fn parse_content_range(
+    headers: &HeaderMap,
+    body_len: u64,
+) -> Result<(u64, u64), (StatusCode, Json<ErrorResponse>)> {
     if let Some(range_header) = headers.get(CONTENT_RANGE).and_then(|h| h.to_str().ok()) {
         if let Some(range_str) = range_header.strip_prefix("bytes ") {
             let parts: Vec<&str> = range_str.split('/').collect();
             if parts.len() == 2 {
                 let range_parts: Vec<&str> = parts[0].split('-').collect();
                 if range_parts.len() == 2 {
-                    if let (Ok(start), Ok(total)) = (range_parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
-                        return Ok((start, total));
+                    if let (Ok(start), Ok(end), Ok(total)) = (
+                        range_parts[0].parse::<u64>(),
+                        range_parts[1].parse::<u64>(),
+                        parts[1].parse::<u64>(),
+                    ) {
+                        let expected_end = start
+                            .checked_add(body_len.saturating_sub(1))
+                            .ok_or_else(|| {
+                                bad_request(
+                                    "INVALID_UPLOAD_RANGE",
+                                    "Content-Range exceeds integer limits",
+                                )
+                            })?;
+                        if body_len > 0 && end == expected_end {
+                            return Ok((start, total));
+                        }
                     }
                 }
             }
         }
+        return Err(bad_request(
+            "INVALID_UPLOAD_RANGE",
+            "Content-Range must match the request body exactly",
+        ));
     }
 
     Ok((0, body_len))
+}
+
+fn bad_request(code: &str, error: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: error.to_string(),
+            code: code.to_string(),
+            details: None,
+        }),
+    )
+}
+
+fn storage_io_error(error: std::io::Error) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: format!("Failed to write upload to storage: {error}"),
+            code: "STORAGE_IO_ERROR".to_string(),
+            details: None,
+        }),
+    )
+}
+
+fn blob_db_error(error: sqlx::Error) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Blob metadata database operation failed".to_string(),
+            code: "DATABASE_ERROR".to_string(),
+            details: Some(error.to_string()),
+        }),
+    )
 }
 
 async fn verify_room_member(
@@ -619,5 +861,27 @@ async fn verify_room_member(
                 details: None,
             }),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_range_must_match_the_body_exactly() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 10-19/30"));
+        assert_eq!(parse_content_range(&headers, 10).unwrap(), (10, 30));
+
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 10-20/30"));
+        let error = parse_content_range(&headers, 10).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1.code, "INVALID_UPLOAD_RANGE");
+    }
+
+    #[test]
+    fn upload_without_content_range_is_a_full_body() {
+        assert_eq!(parse_content_range(&HeaderMap::new(), 42).unwrap(), (0, 42));
     }
 }

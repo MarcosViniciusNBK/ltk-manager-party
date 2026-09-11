@@ -1,22 +1,29 @@
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+ARG BUILDER_IMAGE=rust:1-slim-bookworm
+
 # Build stage
-FROM rust:1-slim-bookworm AS builder
+FROM ${BUILDER_IMAGE} AS builder
 
 WORKDIR /usr/src/room-server
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 COPY migrations ./migrations
 
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM ${RUNTIME_IMAGE}
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ARG SKIP_RUNTIME_APT=false
 
-RUN useradd -m -u 1000 -s /bin/bash appuser
+USER root
+
+RUN if [ "$SKIP_RUNTIME_APT" != "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+RUN id -u appuser >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash appuser
 
 WORKDIR /app
 COPY --from=builder /usr/src/room-server/target/release/ltk-room-server /app/ltk-room-server

@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Superseded by ADR 0041. Room profiles remain dedicated and are never applied automatically, but
+creation and updates are now automatic and collaborative.
 
 ## Context
 

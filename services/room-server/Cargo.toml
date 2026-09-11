@@ -9,6 +9,7 @@ description = "LeagueToolkit Room Synchronization Service"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["trace", "cors", "timeout"] }
@@ -33,4 +34,3 @@ hmac = "0.12"
 hex = "0.4"
 argon2 = { version = "0.5", features = ["std"] }
 rand = "0.8"
-

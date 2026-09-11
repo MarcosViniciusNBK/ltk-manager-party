@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Superseded by ADR 0041. Preparation still imports safely as disabled library content, but room
+membership now invokes it automatically so every member receives the collaborative profile.
 
 ## Context
 

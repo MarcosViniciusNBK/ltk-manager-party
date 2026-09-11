@@ -7,7 +7,9 @@
 
 use crate::error::{AppErrorResponse, IpcResult, RoomSyncErrorKind};
 use crate::mods::ModLibraryState;
-use crate::rooms::{RemoteMemberInfo, RoomCacheStatus, RoomLocalStatus, RoomRuntimeError, RoomSyncState};
+use crate::rooms::{
+    RemoteMemberInfo, RoomCacheStatus, RoomLocalStatus, RoomRuntimeError, RoomSyncState,
+};
 use crate::state::SettingsState;
 use ltk_manager_core::room_sync::{
     CachePruneReport, JoinedRoom, RoomManifest, RoomProfileWorkflowResult, RoomSyncSnapshot,
@@ -35,19 +37,31 @@ impl From<RoomProfileWorkflowResult> for RoomProfileSummary {
     }
 }
 
-/// Create a new online room on the authoritative room server.
+/// Create a room, publish the selected source profile, and materialize its dedicated shared
+/// profile locally. The shared profile is not selected or applied.
 #[tauri::command]
 #[specta::specta]
 pub async fn create_remote_room(
     room_id: String,
     password: String,
+    profile_id: String,
     app_handle: AppHandle,
 ) -> IpcResult<JoinedRoom> {
+    let room_id = room_id.trim().to_lowercase();
     let rooms = rooms(&app_handle);
-    room_task(move || rooms.create_remote_room(&room_id, &password)).await
+    let library = app_handle.state::<ModLibraryState>().0.clone();
+    let config = app_handle.state::<SettingsState>().config();
+    room_task(move || {
+        let _operation = rooms.lock_operation();
+        let joined = rooms.create_remote_room(&room_id, &password)?;
+        rooms.publish_profile_to_remote_room(&room_id, Some(&profile_id), &library, &config)?;
+        Ok::<_, RoomRuntimeError>(joined)
+    })
+    .await
 }
 
-/// Join an existing online room on the authoritative room server.
+/// Join an existing room and automatically download, prepare, and create/update its dedicated
+/// local profile. It remains unapplied until the user uses the existing Start/Play flow.
 #[tauri::command]
 #[specta::specta]
 pub async fn join_remote_room(
@@ -55,8 +69,21 @@ pub async fn join_remote_room(
     password: String,
     app_handle: AppHandle,
 ) -> IpcResult<JoinedRoom> {
+    let room_id = room_id.trim().to_lowercase();
     let rooms = rooms(&app_handle);
-    room_task(move || rooms.join_remote_room(&room_id, &password)).await
+    let library = app_handle.state::<ModLibraryState>().0.clone();
+    let config = app_handle.state::<SettingsState>().config();
+    room_task(move || {
+        let _operation = rooms.lock_operation();
+        let joined = rooms.join_remote_room(&room_id, &password)?;
+        let snapshot = rooms.sync_remote_room(&room_id)?;
+        if snapshot.active_revision > 0 {
+            rooms.prepare_revision(&library, &config, &room_id)?;
+            rooms.create_profile(&library, &config, &room_id)?;
+        }
+        Ok::<_, RoomRuntimeError>(joined)
+    })
+    .await
 }
 
 /// Retrieve active members and synchronization state from the server.
@@ -102,7 +129,11 @@ pub async fn list_room_memberships(app_handle: AppHandle) -> IpcResult<Vec<Joine
 #[specta::specta]
 pub async fn leave_room(room_id: String, app_handle: AppHandle) -> IpcResult<bool> {
     let rooms = rooms(&app_handle);
-    room_task(move || rooms.leave(&room_id)).await
+    room_task(move || {
+        let _operation = rooms.lock_operation();
+        rooms.leave(&room_id)
+    })
+    .await
 }
 
 /// Restore the durable snapshot for one room without making a network request.
@@ -127,7 +158,11 @@ pub async fn synchronize_room_manifest(
     app_handle: AppHandle,
 ) -> IpcResult<RoomSyncSnapshot> {
     let rooms = rooms(&app_handle);
-    room_task(move || rooms.synchronize_manifest(manifest)).await
+    room_task(move || {
+        let _operation = rooms.lock_operation();
+        rooms.synchronize_manifest(manifest)
+    })
+    .await
 }
 
 /// Discard an incomplete target revision while retaining the last accepted revision and its cache
@@ -139,7 +174,11 @@ pub async fn discard_room_target(
     app_handle: AppHandle,
 ) -> IpcResult<RoomSyncSnapshot> {
     let rooms = rooms(&app_handle);
-    room_task(move || rooms.discard_target(&room_id)).await
+    room_task(move || {
+        let _operation = rooms.lock_operation();
+        rooms.discard_target(&room_id)
+    })
+    .await
 }
 
 /// Read the complete accepted room manifest, if this machine has one.
@@ -182,7 +221,7 @@ pub async fn prune_room_cache(app_handle: AppHandle) -> IpcResult<CachePruneRepo
     room_task(move || rooms.prune_cache()).await
 }
 
-/// Publish a local profile to the remote room as owner.
+/// Publish a local profile to the collaborative room as an authenticated member.
 #[tauri::command]
 #[specta::specta]
 pub async fn publish_room_profile(
@@ -194,12 +233,8 @@ pub async fn publish_room_profile(
     let library = app_handle.state::<ModLibraryState>().0.clone();
     let config = app_handle.state::<SettingsState>().config();
     room_task(move || {
-        rooms.publish_profile_to_remote_room(
-            &room_id,
-            profile_id.as_deref(),
-            &library,
-            &config,
-        )
+        let _operation = rooms.lock_operation();
+        rooms.publish_profile_to_remote_room(&room_id, profile_id.as_deref(), &library, &config)
     })
     .await
 }
@@ -216,6 +251,7 @@ pub async fn sync_room_profile(
     let library = app_handle.state::<ModLibraryState>().0.clone();
     let config = app_handle.state::<SettingsState>().config();
     room_task(move || {
+        let _operation = rooms.lock_operation();
         rooms
             .sync_room_profile(&room_id, &library, &config)
             .map(RoomProfileSummary::from)
@@ -259,6 +295,7 @@ impl From<RoomCommandError> for AppErrorResponse {
                 RoomSyncErrorKind::Preparation
             }
             RoomCommandError::Runtime(RoomRuntimeError::Profile(_)) => RoomSyncErrorKind::Profile,
+            RoomCommandError::Runtime(RoomRuntimeError::Credential(_)) => RoomSyncErrorKind::State,
             RoomCommandError::Runtime(RoomRuntimeError::Io(_)) => RoomSyncErrorKind::State,
             RoomCommandError::Runtime(RoomRuntimeError::Network(_)) => {
                 RoomSyncErrorKind::Synchronization

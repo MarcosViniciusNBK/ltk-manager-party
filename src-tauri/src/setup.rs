@@ -108,6 +108,7 @@ pub fn run(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         ],
         Arc::clone(&events),
     )?;
+    let room_sync_worker = room_sync.clone();
 
     let hotkey_manager = crate::hotkeys::HotkeyManager::new(&app_handle);
     hotkey_manager.register_from_settings(&settings);
@@ -155,6 +156,8 @@ pub fn run(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(workshop);
     app.manage(hotkey_manager);
     app.manage(deep_link_state);
+
+    room_sync_worker.maintain_in_background(library.clone(), settings.config.clone());
 
     // Started below the `manage` calls rather than beside the library it
     // maintains: its hashtable sync ends by dropping what the app read out of

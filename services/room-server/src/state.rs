@@ -3,7 +3,7 @@
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, MutexGuard, RwLock};
 
 use crate::rate_limit::RateLimiter;
 use crate::storage::StorageManager;
@@ -15,6 +15,7 @@ pub struct AppState {
     pub active_connections: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub rate_limiter: RateLimiter,
     pub storage: StorageManager,
+    upload_locks: Arc<Vec<Mutex<()>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -32,7 +33,17 @@ impl AppState {
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: RateLimiter::default(),
             storage,
+            upload_locks: Arc::new((0..256).map(|_| Mutex::new(())).collect()),
         }
+    }
+
+    /// Serialize writes for the same content hash using a bounded set of lock stripes.
+    pub async fn lock_upload(&self, content_hash: &str) -> MutexGuard<'_, ()> {
+        let stripe = content_hash
+            .get(..2)
+            .and_then(|prefix| usize::from_str_radix(prefix, 16).ok())
+            .unwrap_or_default();
+        self.upload_locks[stripe].lock().await
     }
 
     pub async fn get_or_create_room_channel(&self, room_id: &str) -> broadcast::Sender<RoomEvent> {

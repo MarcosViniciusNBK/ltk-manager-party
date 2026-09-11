@@ -14,7 +14,7 @@ use crate::mods::archive::metadata::{
 };
 use crate::mods::index::get_active_profile;
 use crate::mods::index::{LibraryModEntry, ModArchiveFormat};
-use crate::mods::types::{EditModMetadataArgs, InstalledMod};
+use crate::mods::types::{EditModMetadataArgs, InstalledMod, ProfileOrderMode};
 use fs_err as fs;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -98,6 +98,23 @@ impl ModLibrary {
                 return Err(AppError::ValidationFailed(
                     "Provided mod IDs do not match the profile's mod order".to_string(),
                 ));
+            }
+
+            let profile = index
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.id == active_profile_id)
+                .ok_or_else(|| AppError::Other("Active profile not found".to_string()))?;
+            if profile.order_mode == ProfileOrderMode::RoomPinned {
+                let enabled: std::collections::HashSet<String> =
+                    profile.enabled_mods.iter().cloned().collect();
+                profile.enabled_mods = mod_ids
+                    .iter()
+                    .filter(|id| enabled.contains(id.as_str()))
+                    .cloned()
+                    .collect();
+                profile.mod_order = mod_ids;
+                return Ok(());
             }
 
             index.apply_flat_mod_order(&mod_ids);

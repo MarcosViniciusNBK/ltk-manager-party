@@ -86,6 +86,10 @@ Para executar qualquer comando no servidor, conecte-se via SSH e vá até o dire
 cd /opt/ltk-room-server
 ```
 
+O arquivo `.env` deve permanecer com permissão `0600` e conter `POSTGRES_PASSWORD` e
+`STORAGE_SECRET`. O Compose recusa iniciar o backend sem uma `STORAGE_SECRET` de pelo menos 32
+caracteres; nunca registre seu valor em logs ou no repositório.
+
 ### Ver Status dos Containers
 
 ```bash
@@ -124,6 +128,10 @@ docker compose exec postgres psql -U ltk -d ltk_rooms
 
 ## 5. Endpoints da API e Verificação
 
+> [!WARNING]
+> O endpoint IP em HTTP é somente para validação privada. Senhas e tokens não têm
+> confidencialidade de transporte até que um hostname com TLS confiável seja configurado.
+
 ### Health Check (Liveness)
 
 Indica se o processo HTTP está respondendo:
@@ -149,7 +157,7 @@ curl -X POST http://177.153.59.168:3000/v1/rooms \
   -H "Content-Type: application/json" \
   -d '{"room_id":"minha-sala","password":"senha-secreta","game_build":"14.1.1"}'
 # Resposta (201 Created):
-# {"room_id":"minha-sala","owner_token":"<hash-owner>","member_token":"<hash-member>","role":"owner"}
+# {"room_id":"minha-sala","member_id":"owner-...","owner_token":"<hash-owner>","member_token":"<hash-member>","role":"owner"}
 ```
 
 ### Entrar na Sala (Member com Senha)
@@ -162,12 +170,12 @@ curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/join \
 # {"room_id":"minha-sala","member_id":"convidado-1","member_token":"<hash>","role":"member","revision":0}
 ```
 
-### Publicar Manifesto com CAS (Compare-and-Swap - Somente Owner)
+### Publicar Manifesto com CAS (Compare-and-Swap - Qualquer Membro Autenticado)
 
 ```bash
 curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/manifest \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <owner_token>" \
+  -H "Authorization: Bearer <member_token>" \
   -d '{
     "previous_revision": 0,
     "manifest": {
@@ -244,12 +252,12 @@ curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/blobs/check \
 # {"existing_hashes":["74237cf..."],"missing_hashes":["aaaaaa..."]}
 ```
 
-### Requisitar URL Assinada de Upload (Owner / Staging)
+### Requisitar URL Assinada de Upload (Membro Autenticado)
 
 ```bash
 curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/blobs/upload_url \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <owner_token>" \
+  -H "Authorization: Bearer <member_token>" \
   -d '{"content_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":2048,"format":"modpkg"}'
 # Resposta (200 OK):
 # {"content_hash":"aaaa...","upload_url":"http://177.153.59.168:3000/v1/blobs/upload/aaaa...?grant=<hmac>&expires=<ts>","expires_at":1757548800}
@@ -258,6 +266,7 @@ curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/blobs/upload_url \
 ### Protocolo de Upload Resumável (transfer.rs)
 
 1. **Probe com `HEAD`**:
+
    ```bash
    curl -I "http://177.153.59.168:3000/v1/blobs/upload/<hash>?grant=<grant>&expires=<ts>"
    # Cabeçalhos retornados:
@@ -302,6 +311,7 @@ curl -H "Range: bytes=1024-" "http://177.153.59.168:3000/v1/blobs/download/<hash
 curl http://177.153.59.168:3000/v1/rooms/<room_id>/audit \
   -H "Authorization: Bearer <token>"
 ```
+
 - Retorna eventos de segurança auditados (`room_created`, `member_joined`, `manifest_published`, `revision_acknowledged`, `owner_transferred`, `upload_url_requested`, `download_url_requested`, `blob_uploaded`).
 - **Garantia de Privacidade**: Senhas, tokens de autenticação (Bearer tokens), grants HMAC e caminhos absolutos do sistema de arquivos são estritamente sanitizados/redigidos (`[REDACTED]`, `[REDACTED_PATH]`).
 - **Controle de Acesso Zero-Trust**: O download de blobs é estritamente limitado aos membros de salas cujo manifesto ativo referencia o hash do blob (`403 BLOB_NOT_IN_ROOM`). Grants de download e upload são assinados com HMAC-SHA256 e vinculados ao ID específico da sala (`{op}:{room_id}:{hash}:{expires}`), impedindo reutilização cross-room.
@@ -374,4 +384,3 @@ As migrações em `migrations/` são executadas automaticamente na inicializaç�
 - **Expiração de Salas**: Salas expiram após 24 horas de inatividade. Qualquer atividade (entrada de membro, publicação de manifesto, ack de revisão ou heartbeat) renova `expires_at = NOW() + INTERVAL '24 hours'`.
 - **Limpeza Automática de Salas**: Um worker Tokio roda a cada 5 minutos no servidor (`DELETE FROM rooms WHERE expires_at < NOW()`), removendo salas expiradas e seus membros/manifestos associados em cascata.
 - **Limpeza Automática de Blobs Órfãos**: Um worker Tokio roda a cada 1 hora no servidor, identificando blobs que não estão associados a nenhum manifesto ativo de sala há mais de 48 horas. Os arquivos em disco e os registros em `room_blobs` são removidos para liberar espaço em disco.
-

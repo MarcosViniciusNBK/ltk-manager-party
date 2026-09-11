@@ -1,65 +1,93 @@
-import { FolderSimpleIcon, KeyIcon, PlusCircleIcon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { SignInIcon, UsersThreeIcon } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 
-import { Button, FormField, SectionCard, useToast } from "@/components";
+import { Button, FormField, SectionCard, SelectField, useToast } from "@/components";
 import { errorMessage, m } from "@/i18n";
 import type { JoinedRoom } from "@/lib/bindings.gen";
+import { useActiveProfile, useProfiles } from "@/modules/library";
 
 import { useCreateRemoteRoom, useJoinRemoteRoom } from "../api";
 
+type Mode = "create" | "join";
+
 export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void }) {
+  const [mode, setMode] = useState<Mode>("join");
   const [roomCode, setRoomCode] = useState("");
   const [password, setPassword] = useState("");
+  const [profileId, setProfileId] = useState("");
+  const { data: profiles = [] } = useProfiles();
+  const { data: activeProfile } = useActiveProfile();
   const toast = useToast();
   const createRemote = useCreateRemoteRoom();
   const joinRemote = useJoinRemoteRoom();
   const busy = createRemote.isPending || joinRemote.isPending;
 
-  function requestedCredentials(): { roomId: string; password: string } | null {
-    const roomId = roomCode.trim();
+  useEffect(() => {
+    if (!profileId && activeProfile) setProfileId(activeProfile.id);
+  }, [activeProfile, profileId]);
+
+  function credentials() {
+    const roomId = roomCode.trim().toLowerCase();
     if (!roomId) {
       toast.warning(m.rooms_code_required());
       return null;
     }
-    const pwd = password.trim();
-    if (!pwd) {
+    if (!password) {
       toast.warning(m.rooms_password_required());
       return null;
     }
-    return { roomId, password: pwd };
+    return { roomId, password };
   }
 
-  function create() {
-    const creds = requestedCredentials();
-    if (!creds) return;
-    createRemote.mutate(creds, {
+  function submit() {
+    const values = credentials();
+    if (!values) return;
+    const callbacks = {
       onSuccess: (room: JoinedRoom) => {
         onOpened(room.roomId);
-        toast.success(m.rooms_created_title(), m.rooms_draft_ready_description());
+        setPassword("");
+        toast.success(
+          mode === "create" ? m.rooms_created_title() : m.rooms_opened_title(),
+          m.rooms_draft_ready_description(),
+        );
       },
       onError: (error: unknown) => toast.error(m.rooms_open_failed_title(), errorMessage(error)),
-    });
-  }
+    };
 
-  function join() {
-    const creds = requestedCredentials();
-    if (!creds) return;
-    joinRemote.mutate(creds, {
-      onSuccess: (room: JoinedRoom) => {
-        onOpened(room.roomId);
-        toast.success(m.rooms_opened_title(), m.rooms_draft_ready_description());
-      },
-      onError: (error: unknown) => toast.error(m.rooms_open_failed_title(), errorMessage(error)),
-    });
+    if (mode === "create") {
+      if (!profileId) {
+        toast.warning(m.rooms_profile_required());
+        return;
+      }
+      createRemote.mutate({ ...values, profileId }, callbacks);
+    } else {
+      joinRemote.mutate(values, callbacks);
+    }
   }
 
   return (
     <SectionCard
       title={m.rooms_join_title()}
       description={m.rooms_join_description()}
-      icon={<KeyIcon className="h-4 w-4" />}
+      icon={<UsersThreeIcon className="h-4 w-4" />}
     >
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="inline-flex rounded-lg border border-surface-700 bg-surface-900 p-1">
+        <Button
+          size="sm"
+          variant={mode === "join" ? "filled" : "ghost"}
+          onClick={() => setMode("join")}
+        >
+          {m.rooms_join_tab()}
+        </Button>
+        <Button
+          size="sm"
+          variant={mode === "create" ? "filled" : "ghost"}
+          onClick={() => setMode("create")}
+        >
+          {m.rooms_create_tab()}
+        </Button>
+      </div>
+      <div className="grid gap-4 md:grid-cols-2">
         <FormField
           label={m.rooms_code_label()}
           description={m.rooms_code_description()}
@@ -75,29 +103,29 @@ export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void
           type="password"
           value={password}
           onChange={(event) => setPassword(event.target.value)}
-          autoComplete="current-password"
+          autoComplete={mode === "join" ? "current-password" : "new-password"}
+          onKeyDown={(event) => event.key === "Enter" && submit()}
         />
       </div>
-      <div className="flex flex-wrap gap-2">
-        <Button
-          variant="filled"
-          left={<PlusCircleIcon weight="bold" />}
-          onClick={create}
-          loading={createRemote.isPending}
-          disabled={busy}
-        >
-          {m.rooms_create_draft_action()}
-        </Button>
-        <Button
-          variant="outline"
-          left={<FolderSimpleIcon weight="bold" />}
-          onClick={join}
-          loading={joinRemote.isPending}
-          disabled={busy}
-        >
-          {m.rooms_open_draft_action()}
-        </Button>
-      </div>
+      {mode === "create" && (
+        <SelectField
+          className="max-w-md"
+          label={m.rooms_publish_profile_label()}
+          description={m.rooms_profile_description()}
+          options={profiles.map((profile) => ({ value: profile.id, label: profile.name }))}
+          value={profileId}
+          onValueChange={(value) => setProfileId(value ?? "")}
+        />
+      )}
+      <Button
+        variant="filled"
+        left={mode === "create" ? <UsersThreeIcon weight="bold" /> : <SignInIcon weight="bold" />}
+        onClick={submit}
+        loading={busy}
+        disabled={busy || (mode === "create" && !profileId)}
+      >
+        {mode === "create" ? m.rooms_create_draft_action() : m.rooms_open_draft_action()}
+      </Button>
     </SectionCard>
   );
 }

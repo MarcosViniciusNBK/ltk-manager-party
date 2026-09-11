@@ -17,20 +17,37 @@ services:
       timeout: 5s
       retries: 5
 
+  storage-init:
+    image: ltk-room-server-room-server
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - "mkdir -p /data/blobs && chown -R 1000:1000 /data/blobs"
+    volumes:
+      - ./data/blobs:/data/blobs
+
   room-server:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILDER_IMAGE: ${BUILDER_IMAGE:-rust:1-slim-bookworm}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-debian:bookworm-slim}
+        SKIP_RUNTIME_APT: ${SKIP_RUNTIME_APT:-false}
     container_name: ltk-room-server
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
     environment:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 3000
       DATABASE_URL: postgres://${POSTGRES_USER:-ltk}:${POSTGRES_PASSWORD:-ltk_secure_pass}@postgres:5432/${POSTGRES_DB:-ltk_rooms}
       STORAGE_DIR: /data/blobs
+      STORAGE_SECRET: ${STORAGE_SECRET:?STORAGE_SECRET must be configured}
       PUBLIC_SERVER_URL: http://177.153.59.168:3000
       RUST_LOG: ltk_room_server=debug,tower_http=info,axum=info
     volumes:
@@ -42,4 +59,3 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-

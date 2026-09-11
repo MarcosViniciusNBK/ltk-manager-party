@@ -10,8 +10,6 @@ mod storage;
 
 use std::path::PathBuf;
 use std::time::Duration;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -69,9 +67,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PathBuf::from("/data/blobs")
             }
         });
-    let storage_secret = std::env::var("STORAGE_SECRET")
-        .map(|s| s.into_bytes())
-        .unwrap_or_else(|_| b"ltk_secure_storage_secret_key_change_in_prod".to_vec());
+    let storage_secret = std::env::var("STORAGE_SECRET").map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "STORAGE_SECRET must be configured",
+        )
+    })?;
+    if storage_secret.len() < 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "STORAGE_SECRET must contain at least 32 characters",
+        )
+        .into());
+    }
+    let storage_secret = storage_secret.into_bytes();
     let public_url = std::env::var("PUBLIC_SERVER_URL")
         .unwrap_or_else(|_| "http://177.153.59.168:3000".to_string());
 
@@ -89,7 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await;
             match res {
                 Ok(r) if r.rows_affected() > 0 => {
-                    info!(cleaned_rooms = r.rows_affected(), "Cleaned up expired rooms");
+                    info!(
+                        cleaned_rooms = r.rows_affected(),
+                        "Cleaned up expired rooms"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Room cleanup background task error");
@@ -133,18 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState::new(pool, storage);
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    let app = routes::create_router(state)
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(300), // Extended for larger blob uploads
-        ));
+    let app = routes::create_router(state).layer(TraceLayer::new_for_http());
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -434,12 +434,11 @@ export const api = {
 
   // Room synchronization, on tauri-specta.
   rooms: {
-    createRemote: (roomId: string, password: string) =>
-      commands.createRemoteRoom(roomId, password).then(toResult),
+    createRemote: (roomId: string, password: string, profileId: string) =>
+      commands.createRemoteRoom(roomId, password, profileId).then(toResult),
     joinRemote: (roomId: string, password: string) =>
       commands.joinRemoteRoom(roomId, password).then(toResult),
-    getRemoteMembers: (roomId: string) =>
-      commands.getRemoteRoomMembers(roomId).then(toResult),
+    getRemoteMembers: (roomId: string) => commands.getRemoteRoomMembers(roomId).then(toResult),
     createDraft: (roomId: string) => commands.createRoomDraft(roomId).then(toResult),
     joinDraft: (roomId: string) => commands.joinRoomDraft(roomId).then(toResult),
     listMemberships: () => commands.listRoomMemberships().then(toResult),

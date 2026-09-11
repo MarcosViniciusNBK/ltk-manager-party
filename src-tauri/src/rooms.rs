@@ -18,6 +18,8 @@ use ltk_manager_core::room_sync::{
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +30,8 @@ const ROOM_STATE_DIRECTORY: &str = "room-sync";
 const ROOM_STATE_DATABASE: &str = "rooms.sqlite3";
 const ROOM_CACHE_DIRECTORY: &str = "cache";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSFER_REQUEST_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 
 type PresenceEventTimes = HashMap<(String, String), (RoomPresenceState, Instant)>;
 
@@ -38,6 +42,8 @@ pub struct RoomSyncState {
     store: Arc<RoomStateStore>,
     cache: RoomCache,
     sessions: Arc<Mutex<HashMap<String, RoomSyncSession>>>,
+    profile_signatures: Arc<Mutex<HashMap<String, u64>>>,
+    operation_lock: Arc<Mutex<()>>,
     events: RoomEventReporter,
 }
 
@@ -56,8 +62,16 @@ impl RoomSyncState {
             store: Arc::new(store),
             cache,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            profile_signatures: Arc::new(Mutex::new(HashMap::new())),
+            operation_lock: Arc::new(Mutex::new(())),
             events: RoomEventReporter::new(events),
         })
+    }
+
+    /// Serialize network/profile mutations with the background reconciler. The guard is acquired
+    /// inside blocking workers, so it never stalls Tauri's async executor or the renderer thread.
+    pub fn lock_operation(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.operation_lock.lock()
     }
 
     /// Create a local draft membership. It does not create a server-side room or send a request.
@@ -105,7 +119,20 @@ impl RoomSyncState {
         let joined = self.store.room(room_id)?;
         let removed = self.store.leave_room(room_id)?;
         self.sessions.lock().remove(room_id);
+        self.profile_signatures.lock().remove(room_id);
         if removed {
+            #[cfg(windows)]
+            {
+                let vault = ltk_manager_core::room_sync::RoomCredentialVault::default();
+                vault.delete(
+                    room_id,
+                    ltk_manager_core::room_sync::RoomSecretKind::MemberToken,
+                )?;
+                vault.delete(
+                    room_id,
+                    ltk_manager_core::room_sync::RoomSecretKind::OwnerToken,
+                )?;
+            }
             if let Some(joined) = joined {
                 self.events.emit_presence(RoomPresenceChanged {
                     room_id: joined.room_id,
@@ -282,7 +309,9 @@ impl RoomSyncState {
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().unwrap_or_default();
-            return Err(RoomRuntimeError::Network(format!("Server error ({status}): {text}")));
+            return Err(RoomRuntimeError::Network(format!(
+                "Server error ({status}): {text}"
+            )));
         }
 
         let body: serde_json::Value = res
@@ -301,11 +330,22 @@ impl RoomSyncState {
         #[cfg(windows)]
         {
             let vault = ltk_manager_core::room_sync::RoomCredentialVault::default();
-            let _ = vault.write(room_id, ltk_manager_core::room_sync::RoomSecretKind::OwnerToken, owner_token.as_bytes());
-            let _ = vault.write(room_id, ltk_manager_core::room_sync::RoomSecretKind::MemberToken, member_token.as_bytes());
+            vault.write(
+                room_id,
+                ltk_manager_core::room_sync::RoomSecretKind::OwnerToken,
+                owner_token.as_bytes(),
+            )?;
+            vault.write(
+                room_id,
+                ltk_manager_core::room_sync::RoomSecretKind::MemberToken,
+                member_token.as_bytes(),
+            )?;
         }
 
-        let owner_member_id = format!("owner-{}", &owner_token[..8.min(owner_token.len())]);
+        let owner_member_id = body
+            .get("member_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RoomRuntimeError::Network("Missing member_id".to_string()))?;
         let joined = self.store.join_room(room_id, &owner_member_id)?;
         let session = RoomSyncSession::restore(
             &self.store,
@@ -351,7 +391,9 @@ impl RoomSyncState {
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().unwrap_or_default();
-            return Err(RoomRuntimeError::Network(format!("Server error ({status}): {text}")));
+            return Err(RoomRuntimeError::Network(format!(
+                "Server error ({status}): {text}"
+            )));
         }
 
         let body: serde_json::Value = res
@@ -370,7 +412,11 @@ impl RoomSyncState {
         #[cfg(windows)]
         {
             let vault = ltk_manager_core::room_sync::RoomCredentialVault::default();
-            let _ = vault.write(room_id, ltk_manager_core::room_sync::RoomSecretKind::MemberToken, member_token.as_bytes());
+            vault.write(
+                room_id,
+                ltk_manager_core::room_sync::RoomSecretKind::MemberToken,
+                member_token.as_bytes(),
+            )?;
         }
 
         let joined = self.store.join_room(room_id, member_id)?;
@@ -414,7 +460,9 @@ impl RoomSyncState {
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().unwrap_or_default();
-            return Err(RoomRuntimeError::Network(format!("Server error ({status}): {text}")));
+            return Err(RoomRuntimeError::Network(format!(
+                "Server error ({status}): {text}"
+            )));
         }
 
         let members: Vec<RemoteMemberInfo> = res
@@ -425,16 +473,18 @@ impl RoomSyncState {
     }
 
     /// Synchronize manifest and missing blobs from the authoritative server.
-    pub fn sync_remote_room(
-        &self,
-        room_id: &str,
-    ) -> Result<RoomSyncSnapshot, RoomRuntimeError> {
+    pub fn sync_remote_room(&self, room_id: &str) -> Result<RoomSyncSnapshot, RoomRuntimeError> {
         let base_url = room_server_url();
         let manifest_url = format!("{base_url}/v1/rooms/{room_id}/manifest");
         let token = self.get_room_token(room_id)?;
 
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(API_REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
+        let transfer_client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(TRANSFER_REQUEST_TIMEOUT)
             .build()
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
@@ -451,7 +501,9 @@ impl RoomSyncState {
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().unwrap_or_default();
-            return Err(RoomRuntimeError::Network(format!("Failed to fetch manifest ({status}): {text}")));
+            return Err(RoomRuntimeError::Network(format!(
+                "Failed to fetch manifest ({status}): {text}"
+            )));
         }
 
         let manifest: RoomManifest = res
@@ -473,7 +525,10 @@ impl RoomSyncState {
                 continue;
             }
 
-            let dl_url_endpoint = format!("{base_url}/v1/rooms/{room_id}/blobs/{}/download_url", room_mod.content_hash.as_str());
+            let dl_url_endpoint = format!(
+                "{base_url}/v1/rooms/{room_id}/blobs/{}/download_url",
+                room_mod.content_hash.as_str()
+            );
             let dl_res = client
                 .get(&dl_url_endpoint)
                 .header("Authorization", format!("Bearer {token}"))
@@ -481,18 +536,58 @@ impl RoomSyncState {
                 .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
             if !dl_res.status().is_success() {
-                return Err(RoomRuntimeError::Network(format!("Failed download URL for {}: {}", room_mod.content_hash.as_str(), dl_res.status())));
+                return Err(RoomRuntimeError::Network(format!(
+                    "Failed download URL for {}: {}",
+                    room_mod.content_hash.as_str(),
+                    dl_res.status()
+                )));
             }
 
-            let dl_info: serde_json::Value = dl_res.json().map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
-            let signed_download_url = dl_info.get("download_url").and_then(|v| v.as_str()).ok_or_else(|| RoomRuntimeError::Network("Missing download_url".to_string()))?;
+            let dl_info: serde_json::Value = dl_res
+                .json()
+                .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
+            let signed_download_url = dl_info
+                .get("download_url")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| RoomRuntimeError::Network("Missing download_url".to_string()))?;
 
             let partial_path = self.cache.prepare_partial(&room_mod.content_hash)?;
-            let mut file = fs::File::create(&partial_path)?;
-            let mut blob_resp = client.get(signed_download_url).send().map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
-            if !blob_resp.status().is_success() {
-                return Err(RoomRuntimeError::Network(format!("Failed downloading blob {}: {}", room_mod.content_hash.as_str(), blob_resp.status())));
+            let mut offset = fs::metadata(&partial_path).map_or(0, |metadata| metadata.len());
+            if offset > room_mod.size_bytes {
+                fs::File::create(&partial_path)?;
+                offset = 0;
             }
+            if offset == room_mod.size_bytes {
+                self.cache.commit_partial(&artifact)?;
+                continue;
+            }
+
+            let mut request = transfer_client.get(signed_download_url);
+            if offset > 0 {
+                request = request.header("Range", format!("bytes={offset}-")).header(
+                    "If-Range",
+                    format!("\"{}\"", room_mod.content_hash.as_str()),
+                );
+            }
+            let mut blob_resp = request
+                .send()
+                .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
+            if !blob_resp.status().is_success() {
+                return Err(RoomRuntimeError::Network(format!(
+                    "Failed downloading blob {}: {}",
+                    room_mod.content_hash.as_str(),
+                    blob_resp.status()
+                )));
+            }
+            if offset > 0 && blob_resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                fs::File::create(&partial_path)?;
+                offset = 0;
+            }
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&partial_path)?;
+            file.seek(SeekFrom::Start(offset))?;
             std::io::copy(&mut blob_resp, &mut file)?;
             drop(file);
 
@@ -518,19 +613,6 @@ impl RoomSyncState {
         Ok(snapshot)
     }
 
-    fn get_owner_token(&self, room_id: &str) -> Result<String, RoomRuntimeError> {
-        #[cfg(windows)]
-        {
-            let vault = ltk_manager_core::room_sync::RoomCredentialVault::default();
-            if let Ok(Some(secret)) = vault.read(room_id, ltk_manager_core::room_sync::RoomSecretKind::OwnerToken) {
-                if let Ok(s) = std::str::from_utf8(secret.as_bytes()) {
-                    return Ok(s.to_string());
-                }
-            }
-        }
-        Err(RoomRuntimeError::Network("Only the room owner can publish mods to this room".to_string()))
-    }
-
     pub fn publish_profile_to_remote_room(
         &self,
         room_id: &str,
@@ -538,20 +620,21 @@ impl RoomSyncState {
         library: &ltk_manager_core::mods::ModLibrary,
         config: &ltk_manager_core::config::Config,
     ) -> Result<RoomSyncSnapshot, RoomRuntimeError> {
-        let owner_token = self.get_owner_token(room_id)?;
+        let room_token = self.get_room_token(room_id)?;
         let (_profile, artifacts) = library
             .collect_profile_room_artifacts(config, profile_id)
-            .map_err(|e| RoomRuntimeError::Network(format!("Failed collecting profile mods: {e}")))?;
-
-        if artifacts.is_empty() {
-            return Err(RoomRuntimeError::Network(
-                "The selected profile has no enabled mods with archives to publish.".to_string(),
-            ));
-        }
+            .map_err(|e| {
+                RoomRuntimeError::Network(format!("Failed collecting profile mods: {e}"))
+            })?;
 
         let base_url = room_server_url();
         let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(API_REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
+        let transfer_client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(TRANSFER_REQUEST_TIMEOUT)
             .build()
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
@@ -559,7 +642,7 @@ impl RoomSyncState {
         let info_url = format!("{base_url}/v1/rooms/{room_id}");
         let info_res = client
             .get(&info_url)
-            .header("Authorization", format!("Bearer {owner_token}"))
+            .header("Authorization", format!("Bearer {room_token}"))
             .send()
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
@@ -591,7 +674,7 @@ impl RoomSyncState {
 
         let check_res = client
             .post(&check_url)
-            .header("Authorization", format!("Bearer {owner_token}"))
+            .header("Authorization", format!("Bearer {room_token}"))
             .json(&serde_json::json!({ "hashes": hashes }))
             .send()
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
@@ -612,43 +695,89 @@ impl RoomSyncState {
 
         // 3. Upload missing blobs
         for hash in &missing_hashes {
-            let Some((path, mod_info)) = artifacts.iter().find(|(_, m)| m.content_hash.as_str() == hash) else {
+            let Some((path, mod_info)) = artifacts
+                .iter()
+                .find(|(_, m)| m.content_hash.as_str() == hash)
+            else {
                 continue;
             };
 
             let upload_url_endpoint = format!("{base_url}/v1/rooms/{room_id}/blobs/upload_url");
             let grant_res = client
                 .post(&upload_url_endpoint)
-                .header("Authorization", format!("Bearer {owner_token}"))
+                .header("Authorization", format!("Bearer {room_token}"))
                 .json(&serde_json::json!({
                     "content_hash": hash,
                     "size_bytes": mod_info.size_bytes,
+                    "format": mod_info.format,
                 }))
                 .send()
                 .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
             if !grant_res.status().is_success() {
                 let err_text = grant_res.text().unwrap_or_default();
-                return Err(RoomRuntimeError::Network(format!("Failed to request upload URL for blob {hash}: {err_text}")));
+                return Err(RoomRuntimeError::Network(format!(
+                    "Failed to request upload URL for blob {hash}: {err_text}"
+                )));
             }
 
-            let grant_body: serde_json::Value = grant_res.json().map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
+            let grant_body: serde_json::Value = grant_res
+                .json()
+                .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
             let upload_url = grant_body["upload_url"].as_str().ok_or_else(|| {
                 RoomRuntimeError::Network("Server did not return upload_url".to_string())
             })?;
 
-            let file_bytes = std::fs::read(path).map_err(|e| RoomRuntimeError::Io(e))?;
-            let put_res = client
+            let probe = transfer_client
+                .head(upload_url)
+                .send()
+                .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+            if !probe.status().is_success() {
+                return Err(RoomRuntimeError::Network(format!(
+                    "Failed to inspect upload offset for blob {hash}: {}",
+                    probe.status()
+                )));
+            }
+            let offset = probe
+                .headers()
+                .get("Upload-Offset")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            if offset > mod_info.size_bytes {
+                return Err(RoomRuntimeError::Network(format!(
+                    "Server returned an invalid upload offset for blob {hash}"
+                )));
+            }
+            if offset == mod_info.size_bytes {
+                continue;
+            }
+
+            let mut file = fs::File::open(path)?;
+            file.seek(SeekFrom::Start(offset))?;
+            let remaining = mod_info.size_bytes - offset;
+            let put_res = transfer_client
                 .put(upload_url)
                 .header("X-Content-SHA256", hash)
                 .header("Content-Type", "application/octet-stream")
-                .body(file_bytes)
+                .header("Content-Length", remaining)
+                .header(
+                    "Content-Range",
+                    format!(
+                        "bytes {offset}-{}/{size}",
+                        mod_info.size_bytes - 1,
+                        size = mod_info.size_bytes
+                    ),
+                )
+                .body(reqwest::blocking::Body::new(file))
                 .send()
                 .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
             if !put_res.status().is_success() {
                 let err_text = put_res.text().unwrap_or_default();
-                return Err(RoomRuntimeError::Network(format!("Failed to upload blob {hash}: {err_text}")));
+                return Err(RoomRuntimeError::Network(format!(
+                    "Failed to upload blob {hash}: {err_text}"
+                )));
             }
         }
 
@@ -656,7 +785,7 @@ impl RoomSyncState {
         let publish_url = format!("{base_url}/v1/rooms/{room_id}/manifest");
         let pub_res = client
             .post(&publish_url)
-            .header("Authorization", format!("Bearer {owner_token}"))
+            .header("Authorization", format!("Bearer {room_token}"))
             .json(&serde_json::json!({
                 "previous_revision": current_revision,
                 "manifest": manifest,
@@ -666,7 +795,9 @@ impl RoomSyncState {
 
         if !pub_res.status().is_success() {
             let err_text = pub_res.text().unwrap_or_default();
-            return Err(RoomRuntimeError::Network(format!("Failed to publish manifest: {err_text}")));
+            return Err(RoomRuntimeError::Network(format!(
+                "Failed to publish manifest: {err_text}"
+            )));
         }
 
         // 5. Commit local files into host's cache so host is immediately synchronized
@@ -678,12 +809,14 @@ impl RoomSyncState {
             };
             if !self.cache.contains(&canonical)? {
                 let partial = self.cache.prepare_partial(&canonical.content_hash)?;
-                let _ = std::fs::copy(path, &partial);
-                let _ = self.cache.commit_partial(&canonical);
+                fs::copy(path, &partial)?;
+                self.cache.commit_partial(&canonical)?;
             }
         }
 
         self.synchronize_manifest(manifest)?;
+        self.prepare_revision(library, config, room_id)?;
+        self.create_profile(library, config, room_id)?;
         self.snapshot(room_id)
     }
 
@@ -700,22 +833,143 @@ impl RoomSyncState {
         self.create_profile(library, config, room_id)
     }
 
+    /// Keep every joined room converged in the background. A local edit to the dedicated room
+    /// profile is published by any authenticated member; a newer server revision is downloaded,
+    /// prepared, and materialized locally. This never selects the profile or invokes the patcher.
+    pub fn maintain_in_background(&self, library: ModLibrary, config: Config) {
+        let rooms = self.clone();
+        std::thread::Builder::new()
+            .name("room-profile-sync".to_string())
+            .spawn(move || loop {
+                if let Err(error) = rooms.reconcile_all_rooms(&library, &config) {
+                    tracing::warn!(%error, "Room background synchronization pass failed");
+                }
+                std::thread::sleep(Duration::from_secs(4));
+            })
+            .expect("room synchronization worker must start");
+    }
+
+    pub fn reconcile_all_rooms(
+        &self,
+        library: &ModLibrary,
+        config: &Config,
+    ) -> Result<(), RoomRuntimeError> {
+        let _operation = self.lock_operation();
+        for room in self.store.rooms()? {
+            if let Err(error) = self.reconcile_room(&room.room_id, library, config) {
+                tracing::warn!(room_id = %room.room_id, %error, "Could not reconcile room");
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_room(
+        &self,
+        room_id: &str,
+        library: &ModLibrary,
+        config: &Config,
+    ) -> Result<(), RoomRuntimeError> {
+        // Publish local collaborative-profile changes first. This makes concurrent edits
+        // deterministic: the last successful CAS revision wins and every client then converges.
+        if let Some(binding) = self.store.room_profile(room_id)? {
+            let profile = library
+                .get_profiles(config)
+                .map_err(|error| RoomRuntimeError::Network(error.to_string()))?
+                .into_iter()
+                .find(|profile| profile.id == binding.local_profile_id);
+            if let Some(profile) = profile {
+                let signature = profile_signature(&profile);
+                let previous = self.profile_signatures.lock().get(room_id).copied();
+                if previous != Some(signature) {
+                    let (_, artifacts) = library
+                        .collect_profile_room_artifacts(config, Some(&profile.id))
+                        .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+                    let candidate: Vec<_> =
+                        artifacts.iter().map(|(_, item)| item.clone()).collect();
+                    let accepted = self.store.accepted_manifest(room_id)?;
+                    if accepted
+                        .as_ref()
+                        .is_none_or(|manifest| manifest.mods != candidate)
+                    {
+                        self.publish_profile_to_remote_room(
+                            room_id,
+                            Some(&profile.id),
+                            library,
+                            config,
+                        )?;
+                    }
+                    self.profile_signatures
+                        .lock()
+                        .insert(room_id.to_string(), signature);
+                }
+            }
+        }
+
+        let remote_revision = self.remote_revision(room_id)?;
+        let local_revision = self
+            .store
+            .accepted_manifest(room_id)?
+            .map_or(0, |manifest| manifest.revision);
+        if remote_revision > local_revision {
+            let result = self.sync_room_profile(room_id, library, config)?;
+            let signature = profile_signature(&result.profile);
+            self.profile_signatures
+                .lock()
+                .insert(room_id.to_string(), signature);
+        }
+        Ok(())
+    }
+
+    fn remote_revision(&self, room_id: &str) -> Result<u64, RoomRuntimeError> {
+        let url = format!("{}/v1/rooms/{room_id}", room_server_url());
+        let token = self.get_room_token(room_id)?;
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| RoomRuntimeError::Network(error.to_string()))?
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(RoomRuntimeError::Network(format!(
+                "Failed to inspect room revision ({status}): {body}"
+            )));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+        body.get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| RoomRuntimeError::Network("Missing room revision".to_string()))
+    }
+
     fn get_room_token(&self, room_id: &str) -> Result<String, RoomRuntimeError> {
         #[cfg(windows)]
         {
             let vault = ltk_manager_core::room_sync::RoomCredentialVault::default();
-            if let Ok(Some(secret)) = vault.read(room_id, ltk_manager_core::room_sync::RoomSecretKind::MemberToken) {
+            if let Some(secret) = vault.read(
+                room_id,
+                ltk_manager_core::room_sync::RoomSecretKind::MemberToken,
+            )? {
                 if let Ok(s) = std::str::from_utf8(secret.as_bytes()) {
                     return Ok(s.to_string());
                 }
             }
-            if let Ok(Some(secret)) = vault.read(room_id, ltk_manager_core::room_sync::RoomSecretKind::OwnerToken) {
+            if let Some(secret) = vault.read(
+                room_id,
+                ltk_manager_core::room_sync::RoomSecretKind::OwnerToken,
+            )? {
                 if let Ok(s) = std::str::from_utf8(secret.as_bytes()) {
                     return Ok(s.to_string());
                 }
             }
         }
-        Err(RoomRuntimeError::Network("No authentication token found for room".to_string()))
+        Err(RoomRuntimeError::Network(
+            "No authentication token found for room".to_string(),
+        ))
     }
 
     /// Callback a future HTTP/WebSocket transport supplies to the transfer engine.
@@ -728,6 +982,25 @@ impl RoomSyncState {
 pub fn room_server_url() -> String {
     std::env::var("LTK_ROOM_SERVER_URL")
         .unwrap_or_else(|_| "http://177.153.59.168:3000".to_string())
+}
+
+fn profile_signature(profile: &ltk_manager_core::mods::Profile) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    profile.id.hash(&mut hasher);
+    profile.mod_order.hash(&mut hasher);
+    profile.enabled_mods.hash(&mut hasher);
+    let mut mods: Vec<_> = profile.layer_states.iter().collect();
+    mods.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (mod_id, layers) in mods {
+        mod_id.hash(&mut hasher);
+        let mut layers: Vec<_> = layers.iter().collect();
+        layers.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        for (layer, enabled) in layers {
+            layer.hash(&mut hasher);
+            enabled.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 /// Remote member presence information from the room server.
@@ -776,6 +1049,8 @@ pub enum RoomRuntimeError {
     Preparation(#[from] RoomPreparationError),
     #[error(transparent)]
     Profile(#[from] RoomProfileWorkflowError),
+    #[error(transparent)]
+    Credential(#[from] ltk_manager_core::room_sync::CredentialError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("Network error: {0}")]

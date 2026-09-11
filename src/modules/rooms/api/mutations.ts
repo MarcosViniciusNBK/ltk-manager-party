@@ -1,6 +1,11 @@
 import { mutationOptions, type QueryClient } from "@tanstack/react-query";
 
-import type { CachePruneReport, JoinedRoom, RoomProfileSummary, RoomSyncSnapshot } from "@/lib/bindings.gen";
+import type {
+  CachePruneReport,
+  JoinedRoom,
+  RoomProfileSummary,
+  RoomSyncSnapshot,
+} from "@/lib/bindings.gen";
 import { api } from "@/lib/tauri";
 import { mutationFn } from "@/utils";
 
@@ -19,11 +24,13 @@ function invalidateRoom(client: QueryClient, roomId: string) {
 
 export const roomMutations = {
   createRemote: (client: QueryClient) =>
-    mutationOptions<JoinedRoom, unknown, { roomId: string; password: string }>({
-      mutationFn: mutationFn<JoinedRoom, unknown, { roomId: string; password: string }>(
-        ({ roomId, password }) => api.rooms.createRemote(roomId, password),
-      ),
-      onSuccess: (room) => invalidateRoom(client, room.roomId),
+    mutationOptions<JoinedRoom, unknown, { roomId: string; password: string; profileId: string }>({
+      mutationFn: mutationFn<
+        JoinedRoom,
+        unknown,
+        { roomId: string; password: string; profileId: string }
+      >(({ roomId, password, profileId }) => api.rooms.createRemote(roomId, password, profileId)),
+      onSettled: (_room, _error, variables) => invalidateRoom(client, variables.roomId),
     }),
 
   joinRemote: (client: QueryClient) =>
@@ -31,14 +38,16 @@ export const roomMutations = {
       mutationFn: mutationFn<JoinedRoom, unknown, { roomId: string; password: string }>(
         ({ roomId, password }) => api.rooms.joinRemote(roomId, password),
       ),
-      onSuccess: (room) => invalidateRoom(client, room.roomId),
+      onSettled: (_room, _error, variables) => invalidateRoom(client, variables.roomId),
     }),
 
   publishProfile: (client: QueryClient) =>
     mutationOptions<RoomSyncSnapshot, unknown, { roomId: string; profileId: string | null }>({
-      mutationFn: mutationFn<RoomSyncSnapshot, unknown, { roomId: string; profileId: string | null }>(
-        ({ roomId, profileId }) => api.rooms.publishProfile(roomId, profileId),
-      ),
+      mutationFn: mutationFn<
+        RoomSyncSnapshot,
+        unknown,
+        { roomId: string; profileId: string | null }
+      >(({ roomId, profileId }) => api.rooms.publishProfile(roomId, profileId)),
       onSuccess: (_snapshot, { roomId }) => invalidateRoom(client, roomId),
     }),
 
@@ -65,7 +74,7 @@ export const roomMutations = {
   leave: (client: QueryClient) =>
     mutationOptions<boolean, unknown, string>({
       mutationFn: mutationFn<boolean, unknown, string>(api.rooms.leave),
-      onSuccess: (_removed, roomId) => invalidateRoom(client, roomId),
+      onSettled: (_removed, _error, roomId) => invalidateRoom(client, roomId),
     }),
 
   pruneCache: (client: QueryClient) =>

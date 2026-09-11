@@ -60,7 +60,10 @@ pub fn sanitize_value(val: serde_json::Value) -> serde_json::Value {
                     || lower_k.contains("key")
                 {
                     sanitized.insert(k, serde_json::Value::String("[REDACTED]".to_string()));
-                } else if lower_k.contains("path") || lower_k.contains("dir") || lower_k.contains("file") {
+                } else if lower_k.contains("path")
+                    || lower_k.contains("dir")
+                    || lower_k.contains("file")
+                {
                     sanitized.insert(k, serde_json::Value::String("[REDACTED_PATH]".to_string()));
                 } else {
                     sanitized.insert(k, sanitize_value(v));
@@ -73,7 +76,12 @@ pub fn sanitize_value(val: serde_json::Value) -> serde_json::Value {
         }
         serde_json::Value::String(s) => {
             // If string looks like an absolute path or bearer token, redact it
-            if s.contains(":\\") || s.starts_with("/home/") || s.starts_with("/opt/") || s.starts_with("/data/") || s.starts_with("/var/") {
+            if s.contains(":\\")
+                || s.starts_with("/home/")
+                || s.starts_with("/opt/")
+                || s.starts_with("/data/")
+                || s.starts_with("/var/")
+            {
                 serde_json::Value::String("[REDACTED_PATH]".to_string())
             } else if s.starts_with("Bearer ") {
                 serde_json::Value::String("[REDACTED_TOKEN]".to_string())

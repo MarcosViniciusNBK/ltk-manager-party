@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn updating_an_active_room_profile_is_refused() {
+    fn updating_an_active_room_profile_changes_only_library_state() {
         let directory = tempfile::tempdir().unwrap();
         let storage = directory.path().join("library");
         let source = directory.path().join("source.modpkg");
@@ -410,19 +410,17 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            create_or_update_room_profile(
-                &store,
-                &library,
-                &config,
-                "room_a",
-                ManifestLimits::default()
-            ),
-            Err(RoomProfileWorkflowError::Library(
-                AppError::ValidationFailed(_)
-            ))
-        ));
-        assert_eq!(store.room_profile("room_a").unwrap().unwrap().revision, 1);
+        let updated = create_or_update_room_profile(
+            &store,
+            &library,
+            &config,
+            "room_a",
+            ManifestLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(updated.revision, 2);
+        assert_eq!(updated.profile.id, profile.id);
+        assert_eq!(store.room_profile("room_a").unwrap().unwrap().revision, 2);
         assert_eq!(
             library.get_active_profile_info(&config).unwrap().id,
             profile.id

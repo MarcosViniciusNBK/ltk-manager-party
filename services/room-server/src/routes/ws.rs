@@ -79,11 +79,13 @@ async fn handle_socket(
 
     // Register active presence
     state.add_connection(&room_id, &member_id).await;
-    let _ = sqlx::query("UPDATE room_members SET last_seen_at = NOW() WHERE room_id = $1 AND member_id = $2")
-        .bind(&room_id)
-        .bind(&member_id)
-        .execute(&state.db)
-        .await;
+    let _ = sqlx::query(
+        "UPDATE room_members SET last_seen_at = NOW() WHERE room_id = $1 AND member_id = $2",
+    )
+    .bind(&room_id)
+    .bind(&member_id)
+    .execute(&state.db)
+    .await;
 
     info!(room_id = %room_id, member_id = %member_id, role = %role, "WebSocket client connected");
 
@@ -135,7 +137,9 @@ async fn handle_socket(
                             }
                             "ack" => {
                                 if let Some(payload) = incoming.payload {
-                                    if let Some(rev) = payload.get("revision").and_then(|r| r.as_i64()) {
+                                    if let Some(rev) =
+                                        payload.get("revision").and_then(|r| r.as_i64())
+                                    {
                                         let status = payload
                                             .get("status")
                                             .and_then(|s| s.as_str())

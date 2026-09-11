@@ -2,8 +2,8 @@
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
@@ -24,7 +24,11 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
-    pub fn new(base_dir: impl AsRef<Path>, secret_key: Vec<u8>, public_url: String) -> io::Result<Self> {
+    pub fn new(
+        base_dir: impl AsRef<Path>,
+        secret_key: Vec<u8>,
+        public_url: String,
+    ) -> io::Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
         let objects_dir = base_dir.join("objects");
         let partial_dir = base_dir.join("partial");
@@ -111,30 +115,6 @@ impl StorageManager {
         let _ = fs::remove_file(path);
     }
 
-    /// Appends or writes bytes to the partial upload file at the specified offset.
-    pub fn write_partial_chunk(
-        &self,
-        content_hash: &str,
-        offset: u64,
-        data: &[u8],
-    ) -> io::Result<u64> {
-        if !Self::is_safe_hash(content_hash) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid content hash"));
-        }
-        let path = self.partial_path(content_hash);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&path)?;
-
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(data)?;
-        file.sync_data()?;
-
-        let new_len = file.metadata()?.len();
-        Ok(new_len)
-    }
-
     /// Verifies the full SHA-256 hash of the partial upload file and promotes it to permanent object.
     pub fn finalize_upload(
         &self,
@@ -145,9 +125,12 @@ impl StorageManager {
             return Err("Invalid content hash".to_string());
         }
         let part_path = self.partial_path(content_hash);
-        let mut file = File::open(&part_path).map_err(|e| format!("Failed to open partial file: {e}"))?;
+        let mut file =
+            File::open(&part_path).map_err(|e| format!("Failed to open partial file: {e}"))?;
 
-        let meta = file.metadata().map_err(|e| format!("Failed to read metadata: {e}"))?;
+        let meta = file
+            .metadata()
+            .map_err(|e| format!("Failed to read metadata: {e}"))?;
         if meta.len() != expected_size {
             return Err(format!(
                 "Uploaded size mismatch: partial file is {} bytes, but expected {}",
@@ -159,7 +142,9 @@ impl StorageManager {
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
         loop {
-            let n = file.read(&mut buffer).map_err(|e| format!("Read error during verification: {e}"))?;
+            let n = file
+                .read(&mut buffer)
+                .map_err(|e| format!("Read error during verification: {e}"))?;
             if n == 0 {
                 break;
             }
@@ -187,9 +172,15 @@ impl StorageManager {
     }
 
     /// Cryptographic grant signature bound to operation, room_id, content_hash, and expiration.
-    pub fn generate_grant(&self, room_id: &str, content_hash: &str, operation: &str, expires_at: u64) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.secret_key)
-            .expect("HMAC can take key of any size");
+    pub fn generate_grant(
+        &self,
+        room_id: &str,
+        content_hash: &str,
+        operation: &str,
+        expires_at: u64,
+    ) -> String {
+        let mut mac =
+            HmacSha256::new_from_slice(&self.secret_key).expect("HMAC can take key of any size");
         let message = format!("{operation}:{room_id}:{content_hash}:{expires_at}");
         mac.update(message.as_bytes());
         hex::encode(mac.finalize().into_bytes())
@@ -270,7 +261,12 @@ mod tests {
     #[test]
     fn test_grant_generation_and_verification() {
         let temp_dir = std::env::temp_dir().join("ltk_storage_test_e16");
-        let manager = StorageManager::new(&temp_dir, b"test_secret_key".to_vec(), "http://localhost:3000".to_string()).unwrap();
+        let manager = StorageManager::new(
+            &temp_dir,
+            b"test_secret_key".to_vec(),
+            "http://localhost:3000".to_string(),
+        )
+        .unwrap();
 
         let hash = "a".repeat(64);
         let (upload_url, expires) = manager.build_upload_url("room-1", &hash);
