@@ -687,18 +687,17 @@ impl RoomSyncState {
         self.snapshot(room_id)
     }
 
-    pub fn sync_and_apply_room(
+    /// Sync the room's manifest, prepare it in the library, and create or update this member's
+    /// non-active room profile in one call. Never selects or activates that profile.
+    pub fn sync_room_profile(
         &self,
         room_id: &str,
         library: &ltk_manager_core::mods::ModLibrary,
         config: &ltk_manager_core::config::Config,
-    ) -> Result<ltk_manager_core::mods::Profile, RoomRuntimeError> {
-        let _ = self.sync_remote_room(room_id)?;
-        let _ = self.prepare_revision(library, config, room_id);
-        let profile_result = self.create_profile(library, config, room_id)?;
-        library
-            .switch_profile(config, profile_result.profile.id.clone())
-            .map_err(|e| RoomRuntimeError::Network(format!("Failed to activate profile: {e}")))
+    ) -> Result<RoomProfileWorkflowResult, RoomRuntimeError> {
+        self.sync_remote_room(room_id)?;
+        self.prepare_revision(library, config, room_id)?;
+        self.create_profile(library, config, room_id)
     }
 
     fn get_room_token(&self, room_id: &str) -> Result<String, RoomRuntimeError> {

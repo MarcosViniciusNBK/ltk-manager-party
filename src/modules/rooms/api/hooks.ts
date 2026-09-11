@@ -10,8 +10,12 @@ export function useJoinRemoteRoom() {
   return useMutation(roomMutations.joinRemote(useQueryClient()));
 }
 
-export function useSyncRemoteRoom() {
-  return useMutation(roomMutations.syncRemote(useQueryClient()));
+export function usePublishRoomProfile() {
+  return useMutation(roomMutations.publishProfile(useQueryClient()));
+}
+
+export function useSyncRoomProfile() {
+  return useMutation(roomMutations.syncProfile(useQueryClient()));
 }
 
 export function useCreateRoomDraft() {
@@ -24,14 +28,6 @@ export function useOpenRoomDraft() {
 
 export function useLeaveRoom() {
   return useMutation(roomMutations.leave(useQueryClient()));
-}
-
-export function usePrepareRoomRevision() {
-  return useMutation(roomMutations.prepare(useQueryClient()));
-}
-
-export function useCreateRoomProfile() {
-  return useMutation(roomMutations.createProfile(useQueryClient()));
 }
 
 export function usePruneRoomCache() {

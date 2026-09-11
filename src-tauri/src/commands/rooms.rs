@@ -10,33 +10,10 @@ use crate::mods::ModLibraryState;
 use crate::rooms::{RemoteMemberInfo, RoomCacheStatus, RoomLocalStatus, RoomRuntimeError, RoomSyncState};
 use crate::state::SettingsState;
 use ltk_manager_core::room_sync::{
-    CachePruneReport, JoinedRoom, RoomManifest, RoomPreparationResult, RoomProfileWorkflowResult,
-    RoomSyncSnapshot,
+    CachePruneReport, JoinedRoom, RoomManifest, RoomProfileWorkflowResult, RoomSyncSnapshot,
 };
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
-
-/// Summary of an explicit local preparation. Local UUIDs remain internal to the library and are
-/// available through its existing APIs; no game-changing action has happened at this point.
-#[derive(Debug, Clone, serde::Serialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct RoomPreparationSummary {
-    pub room_id: String,
-    pub revision: u64,
-    pub imported_count: usize,
-    pub reused_count: usize,
-}
-
-impl From<RoomPreparationResult> for RoomPreparationSummary {
-    fn from(value: RoomPreparationResult) -> Self {
-        Self {
-            room_id: value.room_id,
-            revision: value.revision,
-            imported_count: value.imported_count,
-            reused_count: value.reused_count,
-        }
-    }
-}
 
 /// Result of creating/updating the dedicated room profile. The profile is not selected; the user
 /// must use the existing profile chooser and Start/Play flow themselves.
@@ -91,17 +68,6 @@ pub async fn get_remote_room_members(
 ) -> IpcResult<Vec<RemoteMemberInfo>> {
     let rooms = rooms(&app_handle);
     room_task(move || rooms.remote_room_members(&room_id)).await
-}
-
-/// Synchronize manifest and missing blobs from the authoritative server.
-#[tauri::command]
-#[specta::specta]
-pub async fn sync_remote_room(
-    room_id: String,
-    app_handle: AppHandle,
-) -> IpcResult<RoomSyncSnapshot> {
-    let rooms = rooms(&app_handle);
-    room_task(move || rooms.sync_remote_room(&room_id)).await
 }
 
 /// Create local draft state for a room code. This intentionally does not create a remote room;
@@ -216,44 +182,6 @@ pub async fn prune_room_cache(app_handle: AppHandle) -> IpcResult<CachePruneRepo
     room_task(move || rooms.prune_cache()).await
 }
 
-/// Explicitly import the accepted revision through the existing archive pipeline, registered
-/// disabled. This command never selects a profile or starts the patcher.
-#[tauri::command]
-#[specta::specta]
-pub async fn prepare_room_revision(
-    room_id: String,
-    app_handle: AppHandle,
-) -> IpcResult<RoomPreparationSummary> {
-    let rooms = rooms(&app_handle);
-    let library = app_handle.state::<ModLibraryState>().0.clone();
-    let config = app_handle.state::<SettingsState>().config();
-    room_task(move || {
-        rooms
-            .prepare_revision(&library, &config, &room_id)
-            .map(RoomPreparationSummary::from)
-    })
-    .await
-}
-
-/// Explicitly create/update the non-active profile corresponding to an already prepared revision.
-/// The existing profile switch and Start/Play commands remain separate user actions.
-#[tauri::command]
-#[specta::specta]
-pub async fn create_room_profile(
-    room_id: String,
-    app_handle: AppHandle,
-) -> IpcResult<RoomProfileSummary> {
-    let rooms = rooms(&app_handle);
-    let library = app_handle.state::<ModLibraryState>().0.clone();
-    let config = app_handle.state::<SettingsState>().config();
-    room_task(move || {
-        rooms
-            .create_profile(&library, &config, &room_id)
-            .map(RoomProfileSummary::from)
-    })
-    .await
-}
-
 /// Publish a local profile to the remote room as owner.
 #[tauri::command]
 #[specta::specta]
@@ -276,10 +204,11 @@ pub async fn publish_room_profile(
     .await
 }
 
-/// One-click sync, prepare, and apply room profile.
+/// Sync the room's manifest, prepare it in the library, and create or update this member's
+/// non-active room profile in one call. Never selects or activates that profile.
 #[tauri::command]
 #[specta::specta]
-pub async fn sync_and_apply_room(
+pub async fn sync_room_profile(
     room_id: String,
     app_handle: AppHandle,
 ) -> IpcResult<RoomProfileSummary> {
@@ -287,12 +216,9 @@ pub async fn sync_and_apply_room(
     let library = app_handle.state::<ModLibraryState>().0.clone();
     let config = app_handle.state::<SettingsState>().config();
     room_task(move || {
-        let profile = rooms.sync_and_apply_room(&room_id, &library, &config)?;
-        Ok::<RoomProfileSummary, RoomRuntimeError>(RoomProfileSummary {
-            room_id: room_id.clone(),
-            revision: 0,
-            profile_id: profile.id,
-        })
+        rooms
+            .sync_room_profile(&room_id, &library, &config)
+            .map(RoomProfileSummary::from)
     })
     .await
 }

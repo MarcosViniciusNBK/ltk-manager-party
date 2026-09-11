@@ -1,7 +1,9 @@
+import { UsersThreeIcon } from "@phosphor-icons/react";
 import { Check, Pencil, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button, Field, IconButton, Tooltip, useToast } from "@/components";
+import { m } from "@/i18n";
 import type { Profile } from "@/lib/tauri";
 import { useRenameProfile } from "@/modules/library/api";
 
@@ -97,6 +99,8 @@ export function ProfileListItem({
     );
   }
 
+  const isRoomPinned = profile.orderMode === "roomPinned";
+
   return (
     <div className="flex items-center gap-1">
       <Button
@@ -107,7 +111,17 @@ export function ProfileListItem({
         className="flex-1 justify-between"
         right={isActive ? <Check className="h-4 w-4 text-accent-500" /> : undefined}
       >
-        {profile.name}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate">{profile.name}</span>
+          {isRoomPinned && (
+            <Tooltip content={m.library_profile_room_pinned_hint()}>
+              <span className="bg-primary-500/20 text-primary-300 inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold">
+                <UsersThreeIcon className="h-3 w-3" weight="bold" />
+                {m.library_profile_room_pinned_badge()}
+              </span>
+            </Tooltip>
+          )}
+        </span>
       </Button>
 
       {!isDefaultProfile && (

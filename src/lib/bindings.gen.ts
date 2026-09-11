@@ -119,8 +119,6 @@ export const commands = {
 	joinRemoteRoom: (roomId: string, password: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("join_remote_room", { roomId, password }),
 	/**  Retrieve active members and synchronization state from the server. */
 	getRemoteRoomMembers: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RemoteMemberInfo[] }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_remote_room_members", { roomId }),
-	/**  Synchronize manifest and missing blobs from the authoritative server. */
-	syncRemoteRoom: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("sync_remote_room", { roomId }),
 	/**
 	 *  Create local draft state for a room code. This intentionally does not create a remote room;
 	 *  server-side creation, password handling, and owner tokens arrive with the authoritative service.
@@ -164,16 +162,13 @@ export const commands = {
 	getRoomCacheStatus: () => __TAURI_INVOKE<({ ok: true; value: RoomCacheStatus }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_room_cache_status"),
 	/**  Explicitly prune only unreferenced room-cache blobs. It cannot delete an installed library mod. */
 	pruneRoomCache: () => __TAURI_INVOKE<({ ok: true; value: CachePruneReport }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("prune_room_cache"),
+	/**  Publish a local profile to the remote room as owner. */
+	publishRoomProfile: (roomId: string, profileId: string | null) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("publish_room_profile", { roomId, profileId }),
 	/**
-	 *  Explicitly import the accepted revision through the existing archive pipeline, registered
-	 *  disabled. This command never selects a profile or starts the patcher.
+	 *  Sync the room's manifest, prepare it in the library, and create or update this member's
+	 *  non-active room profile in one call. Never selects or activates that profile.
 	 */
-	prepareRoomRevision: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomPreparationSummary }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("prepare_room_revision", { roomId }),
-	/**
-	 *  Explicitly create/update the non-active profile corresponding to an already prepared revision.
-	 *  The existing profile switch and Start/Play commands remain separate user actions.
-	 */
-	createRoomProfile: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomProfileSummary }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("create_room_profile", { roomId }),
+	syncRoomProfile: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RoomProfileSummary }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("sync_room_profile", { roomId }),
 };
 
 /* Types */
@@ -1110,17 +1105,6 @@ export type RoomMod = {
 
 /**  Formats accepted as immutable room blobs. */
 export type RoomModFormat = "modpkg" | "fantome";
-
-/**
- *  Summary of an explicit local preparation. Local UUIDs remain internal to the library and are
- *  available through its existing APIs; no game-changing action has happened at this point.
- */
-export type RoomPreparationSummary = {
-	roomId: string,
-	revision: number,
-	importedCount: number,
-	reusedCount: number,
-};
 
 export type RoomProfileBinding = {
 	roomId: string,

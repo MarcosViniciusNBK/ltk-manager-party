@@ -1,11 +1,6 @@
 import { mutationOptions, type QueryClient } from "@tanstack/react-query";
 
-import type {
-  CachePruneReport,
-  JoinedRoom,
-  RoomPreparationSummary,
-  RoomProfileSummary,
-} from "@/lib/bindings.gen";
+import type { CachePruneReport, JoinedRoom, RoomProfileSummary, RoomSyncSnapshot } from "@/lib/bindings.gen";
 import { api } from "@/lib/tauri";
 import { mutationFn } from "@/utils";
 
@@ -39,12 +34,20 @@ export const roomMutations = {
       onSuccess: (room) => invalidateRoom(client, room.roomId),
     }),
 
-  syncRemote: (client: QueryClient) =>
-    mutationOptions<unknown, unknown, string>({
-      mutationFn: mutationFn<unknown, unknown, string>((roomId) =>
-        api.rooms.syncRemote(roomId),
+  publishProfile: (client: QueryClient) =>
+    mutationOptions<RoomSyncSnapshot, unknown, { roomId: string; profileId: string | null }>({
+      mutationFn: mutationFn<RoomSyncSnapshot, unknown, { roomId: string; profileId: string | null }>(
+        ({ roomId, profileId }) => api.rooms.publishProfile(roomId, profileId),
       ),
-      onSuccess: (_res, roomId) => invalidateRoom(client, roomId),
+      onSuccess: (_snapshot, { roomId }) => invalidateRoom(client, roomId),
+    }),
+
+  syncProfile: (client: QueryClient) =>
+    mutationOptions<RoomProfileSummary, unknown, string>({
+      mutationFn: mutationFn<RoomProfileSummary, unknown, string>((roomId) =>
+        api.rooms.syncProfile(roomId),
+      ),
+      onSuccess: (_profile, roomId) => invalidateRoom(client, roomId),
     }),
 
   createDraft: (client: QueryClient) =>
@@ -63,18 +66,6 @@ export const roomMutations = {
     mutationOptions<boolean, unknown, string>({
       mutationFn: mutationFn<boolean, unknown, string>(api.rooms.leave),
       onSuccess: (_removed, roomId) => invalidateRoom(client, roomId),
-    }),
-
-  prepare: (client: QueryClient) =>
-    mutationOptions<RoomPreparationSummary, unknown, string>({
-      mutationFn: mutationFn<RoomPreparationSummary, unknown, string>(api.rooms.prepareRevision),
-      onSuccess: (prepared) => invalidateRoom(client, prepared.roomId),
-    }),
-
-  createProfile: (client: QueryClient) =>
-    mutationOptions<RoomProfileSummary, unknown, string>({
-      mutationFn: mutationFn<RoomProfileSummary, unknown, string>(api.rooms.createProfile),
-      onSuccess: (profile) => invalidateRoom(client, profile.roomId),
     }),
 
   pruneCache: (client: QueryClient) =>

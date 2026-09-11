@@ -1,7 +1,8 @@
-import { CaretDownIcon } from "@phosphor-icons/react";
+import { CaretDownIcon, UsersThreeIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 
 import { Button, Popover, TooltipPrimitives as Tooltip } from "@/components";
+import { m } from "@/i18n";
 import type { Profile } from "@/lib/tauri";
 import { useActiveProfile, useProfiles, useSwitchProfile } from "@/modules/library/api";
 
@@ -50,7 +51,15 @@ export function ProfileSelector() {
                     />
                   }
                 >
-                  <span className="min-w-0 truncate">{activeProfile?.name || "Default"}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate">{activeProfile?.name || "Default"}</span>
+                    {activeProfile?.orderMode === "roomPinned" && (
+                      <span className="bg-primary-500/20 text-primary-300 inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold">
+                        <UsersThreeIcon className="h-3 w-3" weight="bold" />
+                        {m.library_profile_room_pinned_badge()}
+                      </span>
+                    )}
+                  </span>
                 </Popover.Trigger>
               }
             />

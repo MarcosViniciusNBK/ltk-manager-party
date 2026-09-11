@@ -1,13 +1,12 @@
 export {
   useCreateRemoteRoom,
   useCreateRoomDraft,
-  useCreateRoomProfile,
   useJoinRemoteRoom,
   useLeaveRoom,
   useOpenRoomDraft,
-  usePrepareRoomRevision,
   usePruneRoomCache,
-  useSyncRemoteRoom,
+  usePublishRoomProfile,
+  useSyncRoomProfile,
 } from "./hooks";
 export { roomKeys } from "./keys";
 export {

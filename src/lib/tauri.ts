@@ -104,7 +104,6 @@ export type {
   RemoteMemberInfo,
   RoomCacheStatus,
   RoomLocalStatus,
-  RoomPreparationSummary,
   RoomProfileSummary,
 } from "@/lib/bindings.gen";
 /* The diagnostics types. A serde `default` or `skip_serializing_if` splits a type by
@@ -441,8 +440,6 @@ export const api = {
       commands.joinRemoteRoom(roomId, password).then(toResult),
     getRemoteMembers: (roomId: string) =>
       commands.getRemoteRoomMembers(roomId).then(toResult),
-    syncRemote: (roomId: string) =>
-      commands.syncRemoteRoom(roomId).then(toResult),
     createDraft: (roomId: string) => commands.createRoomDraft(roomId).then(toResult),
     joinDraft: (roomId: string) => commands.joinRoomDraft(roomId).then(toResult),
     listMemberships: () => commands.listRoomMemberships().then(toResult),
@@ -455,8 +452,9 @@ export const api = {
     localStatus: (roomId: string) => commands.getRoomLocalStatus(roomId).then(toResult),
     cacheStatus: () => commands.getRoomCacheStatus().then(toResult),
     pruneCache: () => commands.pruneRoomCache().then(toResult),
-    prepareRevision: (roomId: string) => commands.prepareRoomRevision(roomId).then(toResult),
-    createProfile: (roomId: string) => commands.createRoomProfile(roomId).then(toResult),
+    publishProfile: (roomId: string, profileId: string | null) =>
+      commands.publishRoomProfile(roomId, profileId).then(toResult),
+    syncProfile: (roomId: string) => commands.syncRoomProfile(roomId).then(toResult),
   },
 
   // Workshop

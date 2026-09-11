@@ -55,7 +55,6 @@ migrated![
     create_remote_room,
     join_remote_room,
     get_remote_room_members,
-    sync_remote_room,
     create_room_draft,
     join_room_draft,
     list_room_memberships,
@@ -67,10 +66,8 @@ migrated![
     get_room_local_status,
     get_room_cache_status,
     prune_room_cache,
-    prepare_room_revision,
-    create_room_profile,
     publish_room_profile,
-    sync_and_apply_room,
+    sync_room_profile,
 ];
 
 /// The builder the bindings are generated from and the handler is built out of.

@@ -17,17 +17,16 @@ import { useActiveProfile } from "@/modules/library";
 import { formatBytes } from "@/utils";
 
 import {
-  useCreateRoomProfile,
   useLeaveRoom,
-  usePrepareRoomRevision,
   useRemoteRoomMembers,
   useRoomLocalStatus,
   useRoomManifest,
   useRoomMemberships,
   useRoomSnapshot,
-  useSyncRemoteRoom,
+  useSyncRoomProfile,
 } from "../api";
 import { getRoomWorkflowStatus } from "../status";
+import { RoomPublishCard } from "./RoomPublishCard";
 import { WorkflowStep } from "./WorkflowStep";
 
 function phaseLabel(phase: string | undefined): string {
@@ -67,9 +66,7 @@ export function RoomDetail({ roomId }: { roomId: string }) {
   const { data: localStatus } = useRoomLocalStatus(roomId);
   const { data: activeProfile } = useActiveProfile();
   const leaveRoom = useLeaveRoom();
-  const prepareRevision = usePrepareRoomRevision();
-  const createRoomProfile = useCreateRoomProfile();
-  const syncRemote = useSyncRemoteRoom();
+  const syncProfile = useSyncRoomProfile();
   const { data: remoteMembers = [] } = useRemoteRoomMembers(roomId);
   const membership = rooms.find((room) => room.roomId === roomId);
   const workflow = getRoomWorkflowStatus({
@@ -83,8 +80,6 @@ export function RoomDetail({ roomId }: { roomId: string }) {
   const progress = snapshot?.totalBlobs
     ? Math.round((snapshot.verifiedBlobs / snapshot.totalBlobs) * 100)
     : 0;
-  const canPrepare = workflow.synchronized && manifest !== null && manifest !== undefined;
-  const canCreateProfile = workflow.prepared && manifest !== null && manifest !== undefined;
 
   function leave() {
     leaveRoom.mutate(roomId, {
@@ -93,26 +88,10 @@ export function RoomDetail({ roomId }: { roomId: string }) {
     });
   }
 
-  function prepare() {
-    prepareRevision.mutate(roomId, {
-      onSuccess: (summary) => {
-        toast.success(
-          m.rooms_prepare_done_title(),
-          m.rooms_prepare_done_description({
-            imported: summary.importedCount,
-            reused: summary.reusedCount,
-          }),
-        );
-      },
-      onError: (error) => toast.error(m.rooms_prepare_failed_title(), errorMessage(error)),
-    });
-  }
-
-  function createProfile() {
-    createRoomProfile.mutate(roomId, {
-      onSuccess: () =>
-        toast.success(m.rooms_profile_done_title(), m.rooms_profile_done_description()),
-      onError: (error) => toast.error(m.rooms_profile_failed_title(), errorMessage(error)),
+  function sync() {
+    syncProfile.mutate(roomId, {
+      onSuccess: () => toast.success(m.rooms_sync_done_title(), m.rooms_sync_done_description()),
+      onError: (error) => toast.error(m.rooms_sync_failed_title(), errorMessage(error)),
     });
   }
 
@@ -152,6 +131,8 @@ export function RoomDetail({ roomId }: { roomId: string }) {
         </div>
       </SectionCard>
 
+      <RoomPublishCard roomId={roomId} />
+
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(16rem,0.65fr)]">
         <SectionCard
           title={m.rooms_sync_title()}
@@ -159,21 +140,11 @@ export function RoomDetail({ roomId }: { roomId: string }) {
           icon={<CloudArrowDownIcon className="h-4 w-4" />}
           action={
             <Button
-              variant="ghost"
+              variant="filled"
               size="sm"
               left={<CloudArrowDownIcon weight="bold" />}
-              loading={syncRemote.isPending}
-              onClick={() => {
-                syncRemote.mutate(roomId, {
-                  onSuccess: () =>
-                    toast.success(
-                      m.rooms_sync_done_title(),
-                      m.rooms_sync_done_description(),
-                    ),
-                  onError: (error: unknown) =>
-                    toast.error(m.rooms_sync_failed_title(), errorMessage(error)),
-                });
-              }}
+              loading={syncProfile.isPending}
+              onClick={sync}
             >
               {m.rooms_sync_action()}
             </Button>
@@ -321,21 +292,6 @@ export function RoomDetail({ roomId }: { roomId: string }) {
           {workflow.prepared &&
             m.rooms_step_prepared_ready({ revision: localStatus?.preparedRevision ?? 0 })}
           {!workflow.prepared && <p>{m.rooms_step_prepared_waiting()}</p>}
-          {workflow.synchronized && !workflow.prepared && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                variant="duotone"
-                left={<CloudArrowDownIcon weight="bold" />}
-                onClick={prepare}
-                loading={prepareRevision.isPending}
-                disabled={!canPrepare}
-              >
-                {m.rooms_prepare_action()}
-              </Button>
-              <span className="text-xs text-surface-400">{m.rooms_prepare_description()}</span>
-            </div>
-          )}
           {!workflow.synchronized && (
             <p className="mt-2 text-xs text-surface-500">{m.rooms_workflow_unavailable()}</p>
           )}
@@ -344,21 +300,6 @@ export function RoomDetail({ roomId }: { roomId: string }) {
           {workflow.profileReady &&
             m.rooms_step_profile_ready({ revision: localStatus?.profile?.revision ?? 0 })}
           {!workflow.profileReady && <p>{m.rooms_step_profile_waiting()}</p>}
-          {workflow.prepared && !workflow.profileReady && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                variant="duotone"
-                left={<FolderSimpleIcon weight="bold" />}
-                onClick={createProfile}
-                loading={createRoomProfile.isPending}
-                disabled={!canCreateProfile}
-              >
-                {m.rooms_profile_action()}
-              </Button>
-              <span className="text-xs text-surface-400">{m.rooms_profile_description()}</span>
-            </div>
-          )}
         </WorkflowStep>
         <WorkflowStep title={m.rooms_step_applied_title()} ready={false}>
           {workflow.profileSelected && <p>{m.rooms_step_applied_selected()}</p>}

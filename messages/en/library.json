@@ -123,5 +123,7 @@
   "library_play_league_running_hint": "League is already running - your mods will apply to your next game",
   "library_play_league_running_no_mods_hint": "League is already running - enable a mod to patch it",
   "library_play_no_mods_hint": "No mods are enabled - League will launch unmodded",
-  "library_play_starting_label": "Starting..."
+  "library_play_starting_label": "Starting...",
+  "library_profile_room_pinned_badge": "Room",
+  "library_profile_room_pinned_hint": "This profile's mod order and layers come from a room. They're replaced automatically the next time you sync that room."
 }

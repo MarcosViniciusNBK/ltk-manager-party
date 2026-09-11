@@ -33,7 +33,7 @@ layerStates: { [key in string]: { [key in string]: boolean } },
 /**
  * Whether the profile follows the library folders or a room revision's exact order.
  */
-orderMode: ProfileOrderMode,
+orderMode: ProfileOrderMode, 
 /**
  * Creation timestamp
  */
