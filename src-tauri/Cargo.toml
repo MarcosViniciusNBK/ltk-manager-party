@@ -1,6 +1,6 @@
 [package]
 name = "ltk-manager"
-version = "1.18.1"
+version = "1.19.0"
 description = "LeagueToolkit Mod Manager - Desktop app for managing League of Legends mods"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -34,6 +34,7 @@ ltk-telemetry = { workspace = true }
 ltk_mod_core = { version = "0.1.0" }
 ltk_overlay = { workspace = true }
 ltk_file = { workspace = true }
+ltk_hash = { workspace = true }
 
 serde_yaml_ng = { workspace = true }
 semver = { workspace = true }

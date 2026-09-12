@@ -2140,7 +2140,7 @@
     },
     {
       "name": "ltk-manager",
-      "version": "1.18.1",
+      "version": "1.19.0",
       "url": "https://github.com/LeagueToolkit/ltk-manager",
       "licenses": [
         59
@@ -2160,6 +2160,13 @@
       "url": "https://github.com/LeagueToolkit/ltk-manager",
       "licenses": [
         59
+      ]
+    },
+    {
+      "name": "ltk_anim",
+      "version": "0.3.6",
+      "licenses": [
+        41
       ]
     },
     {
@@ -2203,6 +2210,13 @@
     {
       "name": "ltk_io_ext",
       "version": "0.4.4",
+      "licenses": [
+        41
+      ]
+    },
+    {
+      "name": "ltk_mesh",
+      "version": "0.4.5",
       "licenses": [
         41
       ]

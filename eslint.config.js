@@ -104,7 +104,8 @@ export default tseslint.config(
       ],
       "@typescript-eslint/no-explicit-any": "warn",
       "react/prop-types": "off",
-      "simple-import-sort/imports": "error",
+      /* Import order is oxfmt's `sortImports`, so `pnpm format` fixes it and
+         `format:check` gates it. Two owners would fight over the same lines. */
       "simple-import-sort/exports": "error",
     },
   },
@@ -219,6 +220,12 @@ export default tseslint.config(
     /* Where the configured merger is built. */
     files: ["src/utils/twMerge.ts"],
     rules: { "no-restricted-imports": "off" },
+  },
+  {
+    /* React Three Fiber's reconciler draws ThreeJS objects rather than DOM nodes, so
+       every element and prop in this directory is one the DOM rule has never heard of. */
+    files: ["src/modules/viewport/**/*.tsx", "src/modules/workshop/bin/vfx/**/*.tsx"],
+    rules: { "react/no-unknown-property": "off" },
   },
   {
     files: ["scripts/**/*.mjs"],
