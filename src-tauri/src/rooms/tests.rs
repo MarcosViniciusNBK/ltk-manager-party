@@ -42,6 +42,7 @@ fn manifest(bytes: &[u8]) -> (RoomManifest, CanonicalRoomArtifact) {
                 format: artifact.format,
                 display_name: "Shared mod".to_string(),
                 version: String::new(),
+                enabled: true,
                 suggested_layers: Vec::new(),
             }],
         },
@@ -182,6 +183,7 @@ fn realtime_event_parser_only_accepts_named_events() {
 fn remote_members_accept_server_snake_case_and_emit_ipc_camel_case() {
     let wire: RemoteMemberInfoWire = serde_json::from_value(serde_json::json!({
         "member_id": "member_a",
+        "display_name": "DESKTOP-ALPHA",
         "role": "member",
         "last_acknowledged_revision": 4,
         "ack_status": "synchronized",
@@ -193,12 +195,27 @@ fn remote_members_accept_server_snake_case_and_emit_ipc_camel_case() {
     let member = RemoteMemberInfo::from(wire);
 
     assert_eq!(member.member_id, "member_a");
+    assert_eq!(member.display_name, "DESKTOP-ALPHA");
     assert_eq!(member.last_acknowledged_revision, 4);
 
     let ipc = serde_json::to_value(member).unwrap();
     assert_eq!(ipc["memberId"], "member_a");
+    assert_eq!(ipc["displayName"], "DESKTOP-ALPHA");
     assert_eq!(ipc["lastAcknowledgedRevision"], 4);
     assert!(ipc.get("member_id").is_none());
+}
+
+#[test]
+fn computer_names_are_sanitized_for_visible_room_identity() {
+    assert_eq!(
+        normalize_computer_display_name(Some("  DESKTOP-ALPHA\n".to_string())),
+        "DESKTOP-ALPHA"
+    );
+    assert_eq!(normalize_computer_display_name(None), "This computer");
+    assert_eq!(
+        normalize_computer_display_name(Some("x".repeat(100))),
+        "x".repeat(64)
+    );
 }
 
 #[test]

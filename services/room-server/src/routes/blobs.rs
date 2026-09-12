@@ -10,6 +10,7 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::time::{timeout, Duration};
 use tokio_util::io::ReaderStream;
 use tracing::info;
 
@@ -18,6 +19,10 @@ use crate::error::ErrorResponse;
 use crate::routes::rooms::extract_token;
 use crate::state::AppState;
 use crate::storage::{StorageManager, MAX_BLOB_SIZE_BYTES};
+
+/// Active uploads may take hours, but a connection that stops providing body data must not hold a
+/// room's per-blob lock forever or leave the desktop waiting without feedback.
+const UPLOAD_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Deserialize)]
 pub struct CheckBlobsRequest {
@@ -472,7 +477,19 @@ pub async fn put_upload_blob(
 
     let mut stream = body.into_data_stream();
     let mut received = 0_u64;
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = timeout(UPLOAD_BODY_IDLE_TIMEOUT, stream.next())
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(ErrorResponse {
+                    error: "Upload stopped transferring data for too long".to_string(),
+                    code: "UPLOAD_IDLE_TIMEOUT".to_string(),
+                    details: None,
+                }),
+            )
+        })?
+    {
         let chunk = chunk.map_err(|error| {
             bad_request(
                 "INVALID_UPLOAD_BODY",

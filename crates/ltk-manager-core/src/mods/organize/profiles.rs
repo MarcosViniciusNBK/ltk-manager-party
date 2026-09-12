@@ -14,19 +14,20 @@ use crate::mods::types::{Profile, ProfileOrderMode, ProfileSlug};
 
 const ROOM_PROFILE_MARKER: &str = ".room-sync-room-id";
 
-/// A prepared local mod and the exact layer names the room profile enables for it.
+/// A prepared local mod and its exact room-profile state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RoomProfileModSpec {
     pub(crate) local_mod_id: String,
+    pub(crate) enabled: bool,
     pub(crate) enabled_layers: Vec<String>,
 }
 
 impl ModLibrary {
     /// Create or update a dedicated room profile without activating it.
     ///
-    /// The profile keeps the room manifest's exact local UUID order, enables only those mods, and
-    /// records every layer explicitly. It is marked on disk with the room ID so interrupted state
-    /// writes can recover the same local profile instead of creating another one.
+    /// The profile keeps the room manifest's exact local UUID order, whole-mod enabled state, and
+    /// every layer selection. It is marked on disk with the room ID so interrupted state writes
+    /// can recover the same local profile instead of creating another one.
     pub(crate) fn upsert_room_profile(
         &self,
         config: &Config,
@@ -45,12 +46,17 @@ impl ModLibrary {
                 .iter()
                 .map(|room_mod| room_mod.local_mod_id.clone())
                 .collect();
+            let enabled_mods: Vec<String> = mods
+                .iter()
+                .filter(|room_mod| room_mod.enabled)
+                .map(|room_mod| room_mod.local_mod_id.clone())
+                .collect();
 
             let profile = if let Some(position) = find_room_profile(index, storage_dir, room_id) {
                 let profile = &mut index.profiles[position];
                 profile.order_mode = ProfileOrderMode::RoomPinned;
                 profile.mod_order = mod_order.clone();
-                profile.enabled_mods = mod_order;
+                profile.enabled_mods = enabled_mods.clone();
                 profile.layer_states = layer_states;
                 profile.clone()
             } else {
@@ -59,7 +65,7 @@ impl ModLibrary {
                     id: Uuid::new_v4().to_string(),
                     name,
                     slug,
-                    enabled_mods: mod_order.clone(),
+                    enabled_mods,
                     mod_order,
                     layer_states,
                     order_mode: ProfileOrderMode::RoomPinned,
@@ -265,7 +271,11 @@ impl ModLibrary {
         })
     }
 
-    /// Collect the installed archive paths and RoomMod representations for all enabled mods in a profile.
+    /// Collect the installed archive paths and RoomMod representations for a profile.
+    ///
+    /// Ordinary profiles preserve the historical behavior of sharing only enabled mods. Dedicated
+    /// room profiles retain their complete pinned list so a disabled room mod remains shared as a
+    /// disabled state rather than being mistaken for a removal.
     pub fn collect_profile_room_artifacts(
         &self,
         config: &Config,
@@ -280,8 +290,16 @@ impl ModLibrary {
                 None => get_active_profile(index)?,
             };
 
+            let shared_mod_ids = if profile.order_mode == ProfileOrderMode::RoomPinned {
+                &profile.mod_order
+            } else {
+                &profile.enabled_mods
+            };
+            let enabled_ids: std::collections::HashSet<&str> =
+                profile.enabled_mods.iter().map(String::as_str).collect();
+
             let mut artifacts = Vec::new();
-            for mod_id in &profile.enabled_mods {
+            for mod_id in shared_mod_ids {
                 let entry = index
                     .mods
                     .iter()
@@ -291,7 +309,7 @@ impl ModLibrary {
                 let archive_path = entry.archive_path(storage_dir);
                 if !archive_path.is_file() {
                     return Err(AppError::InvalidPath(format!(
-                        "Enabled mod archive is missing and cannot be shared: {mod_id}"
+                        "Shared mod archive is missing and cannot be shared: {mod_id}"
                     )));
                 }
 
@@ -304,7 +322,7 @@ impl ModLibrary {
                     }
                     crate::mods::ModArchiveFormat::Unknown => {
                         return Err(AppError::ValidationFailed(format!(
-                            "Enabled mod has no shareable archive format: {mod_id}"
+                            "Shared mod has no shareable archive format: {mod_id}"
                         )));
                     }
                 };
@@ -313,7 +331,7 @@ impl ModLibrary {
                     crate::room_sync::CanonicalRoomArtifact::from_file(&archive_path, room_format)
                         .map_err(|error| {
                             AppError::ValidationFailed(format!(
-                                "Enabled mod cannot be shared ({mod_id}): {error}"
+                                "Shared mod cannot be shared ({mod_id}): {error}"
                             ))
                         })?;
 
@@ -353,6 +371,7 @@ impl ModLibrary {
                         format: room_format,
                         display_name,
                         version,
+                        enabled: enabled_ids.contains(mod_id.as_str()),
                         suggested_layers,
                     },
                 ));

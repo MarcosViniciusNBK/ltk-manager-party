@@ -45,8 +45,12 @@ use thiserror::Error;
 
 use fs_err as fs;
 
-/// The only manifest schema this build understands.
-pub const ROOM_MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// Current manifest schema emitted by this build.
+///
+/// Version 2 adds the synchronized whole-mod enabled state. Version 1 remains readable so an
+/// existing room can be upgraded by its next publish, but this build never emits it again.
+pub const ROOM_MANIFEST_SCHEMA_VERSION: u32 = 2;
+const MINIMUM_SUPPORTED_ROOM_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 /// SHA-256 rendered as exactly 64 lowercase hexadecimal characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -246,9 +250,17 @@ pub struct RoomMod {
     pub display_name: String,
     /// Display-only source version.
     pub version: String,
+    /// Whether this room profile enables the mod. Disabled mods remain part of the manifest so
+    /// every member keeps the same profile state without re-downloading them on re-enable.
+    #[serde(default = "default_room_mod_enabled")]
+    pub enabled: bool,
     /// A suggestion for an explicit future local import action, not an instruction to apply it.
     #[serde(default)]
     pub suggested_layers: Vec<String>,
+}
+
+fn default_room_mod_enabled() -> bool {
+    true
 }
 
 /// Immutable description of the exact files in one room revision.
@@ -269,7 +281,9 @@ pub struct RoomManifest {
 impl RoomManifest {
     /// Validate data received across a trust boundary without touching disk or application state.
     pub fn validate(&self, limits: ManifestLimits) -> Result<ManifestSummary, ManifestError> {
-        if self.schema_version != ROOM_MANIFEST_SCHEMA_VERSION {
+        if !(MINIMUM_SUPPORTED_ROOM_MANIFEST_SCHEMA_VERSION..=ROOM_MANIFEST_SCHEMA_VERSION)
+            .contains(&self.schema_version)
+        {
             return Err(ManifestError::UnsupportedSchema {
                 found: self.schema_version,
                 supported: ROOM_MANIFEST_SCHEMA_VERSION,
@@ -490,6 +504,7 @@ mod tests {
             format: RoomModFormat::Modpkg,
             display_name: format!("Mod {byte}"),
             version: "1.0.0".to_string(),
+            enabled: true,
             suggested_layers: vec!["base".to_string()],
         }
     }
@@ -544,6 +559,27 @@ mod tests {
             value.validate(ManifestLimits::default()),
             Err(ManifestError::ZeroRevision)
         );
+    }
+
+    #[test]
+    fn legacy_manifest_defaults_mods_to_enabled_but_current_manifests_preserve_disabled_state() {
+        let mut legacy = manifest(vec![room_mod(1, 10)]);
+        legacy.schema_version = 1;
+        assert!(legacy.validate(ManifestLimits::default()).is_ok());
+
+        let mut current = manifest(vec![room_mod(1, 10)]);
+        current.mods[0].enabled = false;
+        let encoded = serde_json::to_value(&current).unwrap();
+        assert_eq!(encoded["mods"][0]["enabled"], false);
+
+        let mut legacy_json = encoded;
+        legacy_json["schemaVersion"] = serde_json::json!(1);
+        legacy_json["mods"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("enabled");
+        let decoded: RoomManifest = serde_json::from_value(legacy_json).unwrap();
+        assert!(decoded.mods[0].enabled);
     }
 
     #[test]

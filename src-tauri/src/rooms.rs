@@ -17,7 +17,7 @@ use ltk_manager_core::room_sync::{
     ManifestLimits, RoomCache, RoomCacheError, RoomClientError, RoomManifest, RoomPreparationError,
     RoomPreparationResult, RoomProfileBinding, RoomProfileWorkflowError, RoomProfileWorkflowResult,
     RoomStateError, RoomStateStore, RoomSyncPhase, RoomSyncSession, RoomSyncSnapshot,
-    TransferDirection, TransferProgress, TransferProgressCallback,
+    TransferDirection, TransferProgress, TransferProgressCallback, ROOM_MANIFEST_SCHEMA_VERSION,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -36,7 +36,9 @@ const ROOM_STATE_DATABASE: &str = "rooms.sqlite3";
 const ROOM_CACHE_DIRECTORY: &str = "cache";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const TRANSFER_REQUEST_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
+// The server rejects an upload that stops delivering body data for 90 seconds. This client-side
+// cap also protects the UI if a broken connection never reaches the server at all.
+const TRANSFER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const REALTIME_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const FALLBACK_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -50,6 +52,7 @@ pub struct RoomSyncState {
     cache: RoomCache,
     sessions: Arc<Mutex<HashMap<String, RoomSyncSession>>>,
     profile_signatures: Arc<Mutex<HashMap<String, u64>>>,
+    member_display_names: Arc<Mutex<HashMap<String, String>>>,
     operation_lock: Arc<Mutex<()>>,
     library_change_generation: Arc<AtomicU64>,
     events: RoomEventReporter,
@@ -71,6 +74,7 @@ impl RoomSyncState {
             cache,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             profile_signatures: Arc::new(Mutex::new(HashMap::new())),
+            member_display_names: Arc::new(Mutex::new(HashMap::new())),
             operation_lock: Arc::new(Mutex::new(())),
             library_change_generation: Arc::new(AtomicU64::new(0)),
             events: RoomEventReporter::new(events),
@@ -140,6 +144,7 @@ impl RoomSyncState {
         let removed = self.store.leave_room(room_id)?;
         self.sessions.lock().remove(room_id);
         self.profile_signatures.lock().remove(room_id);
+        self.member_display_names.lock().remove(room_id);
         if removed {
             #[cfg(windows)]
             {
@@ -333,9 +338,11 @@ impl RoomSyncState {
     ) -> Result<ltk_manager_core::room_sync::JoinedRoom, RoomRuntimeError> {
         let base_url = room_server_url();
         let url = format!("{base_url}/v1/rooms");
+        let display_name = local_computer_display_name();
         let payload = serde_json::json!({
             "room_id": room_id,
             "password": password,
+            "display_name": display_name,
         });
 
         let client = reqwest::blocking::Client::builder()
@@ -391,6 +398,9 @@ impl RoomSyncState {
             .and_then(|v| v.as_str())
             .ok_or_else(|| RoomRuntimeError::Network("Missing member_id".to_string()))?;
         let joined = self.store.join_room(room_id, &owner_member_id)?;
+        self.member_display_names
+            .lock()
+            .insert(room_id.to_string(), local_computer_display_name());
         let session = RoomSyncSession::restore(
             &self.store,
             &self.cache,
@@ -416,8 +426,10 @@ impl RoomSyncState {
     ) -> Result<ltk_manager_core::room_sync::JoinedRoom, RoomRuntimeError> {
         let base_url = room_server_url();
         let url = format!("{base_url}/v1/rooms/{room_id}/join");
+        let display_name = local_computer_display_name();
         let payload = serde_json::json!({
             "password": password,
+            "display_name": display_name,
         });
 
         let client = reqwest::blocking::Client::builder()
@@ -464,6 +476,9 @@ impl RoomSyncState {
         }
 
         let joined = self.store.join_room(room_id, member_id)?;
+        self.member_display_names
+            .lock()
+            .insert(room_id.to_string(), local_computer_display_name());
         let session = RoomSyncSession::restore(
             &self.store,
             &self.cache,
@@ -486,6 +501,13 @@ impl RoomSyncState {
         &self,
         room_id: &str,
     ) -> Result<Vec<RemoteMemberInfo>, RoomRuntimeError> {
+        // Update an existing membership before loading the list, so a desktop upgraded to this
+        // version appears by its computer name immediately rather than after its next WebSocket
+        // reconnect. A temporary name-refresh failure must not hide the member list itself.
+        if let Err(error) = self.refresh_remote_member_display_name(room_id) {
+            tracing::warn!(room_id, %error, "Could not refresh room member display name");
+        }
+
         let base_url = room_server_url();
         let url = format!("{base_url}/v1/rooms/{room_id}/members");
         let token = self.get_room_token(room_id)?;
@@ -514,6 +536,44 @@ impl RoomSyncState {
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
         Ok(members.into_iter().map(RemoteMemberInfo::from).collect())
+    }
+
+    /// Keep the visible member name aligned with the Windows computer name without changing the
+    /// opaque member ID or any credentials. A successful name already sent during this process is
+    /// cached, so reconnect loops do not generate redundant room events.
+    fn refresh_remote_member_display_name(&self, room_id: &str) -> Result<bool, RoomRuntimeError> {
+        let display_name = local_computer_display_name();
+        if self
+            .member_display_names
+            .lock()
+            .get(room_id)
+            .is_some_and(|previous| previous == &display_name)
+        {
+            return Ok(false);
+        }
+
+        let token = self.get_room_token(room_id)?;
+        let url = format!("{}/v1/rooms/{room_id}/member", room_server_url());
+        let response = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| RoomRuntimeError::Network(error.to_string()))?
+            .put(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "display_name": display_name }))
+            .send()
+            .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(RoomRuntimeError::Network(format!(
+                "Could not update room member name ({})",
+                response.status()
+            )));
+        }
+
+        self.member_display_names
+            .lock()
+            .insert(room_id.to_string(), local_computer_display_name());
+        Ok(true)
     }
 
     /// Synchronize manifest and missing blobs from the authoritative server.
@@ -785,7 +845,7 @@ impl RoomSyncState {
             artifacts.iter().map(|(_, m)| m.clone()).collect();
 
         let manifest = ltk_manager_core::room_sync::RoomManifest {
-            schema_version: 1,
+            schema_version: ROOM_MANIFEST_SCHEMA_VERSION,
             room_id: room_id.to_string(),
             revision: next_revision,
             game_build: None,
@@ -843,6 +903,18 @@ impl RoomSyncState {
                 continue;
             };
 
+            // Report the chosen file before asking the server for a grant. If that request or the
+            // resume probe fails, the UI still tells the user exactly which mod stopped.
+            self.events.emit_transfer(TransferProgress {
+                room_id: room_id.to_string(),
+                content_hash: mod_info.content_hash.clone(),
+                display_name: Some(mod_info.display_name.clone()),
+                direction: TransferDirection::Upload,
+                transferred_bytes: 0,
+                total_bytes: mod_info.size_bytes,
+                attempt: 1,
+            });
+
             let upload_url_endpoint = format!("{base_url}/v1/rooms/{room_id}/blobs/upload_url");
             let grant_res = client
                 .post(&upload_url_endpoint)
@@ -869,7 +941,9 @@ impl RoomSyncState {
                 RoomRuntimeError::Network("Server did not return upload_url".to_string())
             })?;
 
-            let probe = transfer_client
+            // A grant/probe is a small control request, so use the short API timeout rather than
+            // the long stream timeout reserved for a real file body.
+            let probe = client
                 .head(upload_url)
                 .send()
                 .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
@@ -1092,6 +1166,14 @@ impl RoomSyncState {
         config: &Config,
     ) -> Result<(), RoomRuntimeError> {
         use tungstenite::client::IntoClientRequest;
+
+        if let Err(error) = self.refresh_remote_member_display_name(room_id) {
+            // The WebSocket/revision path remains useful even if this optional visible-name refresh
+            // is temporarily unavailable; retry on the next reconnect.
+            tracing::warn!(room_id, %error, "Could not refresh room member display name");
+        } else {
+            self.events.emit_sync(self.snapshot(room_id)?);
+        }
 
         let token = self.get_room_token(room_id)?;
         let base_url = room_server_url();
@@ -1475,11 +1557,34 @@ fn profile_signature(profile: &ltk_manager_core::mods::Profile) -> u64 {
     hasher.finish()
 }
 
+fn local_computer_display_name() -> String {
+    let name = std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok());
+    normalize_computer_display_name(name)
+}
+
+fn normalize_computer_display_name(name: Option<String>) -> String {
+    let name: String = name
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(64)
+        .collect();
+    if name.is_empty() {
+        "This computer".to_string()
+    } else {
+        name
+    }
+}
+
 /// Remote member presence information from the room server.
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteMemberInfo {
     pub member_id: String,
+    pub display_name: String,
     pub role: String,
     pub last_acknowledged_revision: i64,
     pub ack_status: String,
@@ -1490,6 +1595,8 @@ pub struct RemoteMemberInfo {
 #[derive(Debug, serde::Deserialize)]
 struct RemoteMemberInfoWire {
     member_id: String,
+    #[serde(default)]
+    display_name: String,
     role: String,
     last_acknowledged_revision: i64,
     ack_status: String,
@@ -1501,6 +1608,7 @@ impl From<RemoteMemberInfoWire> for RemoteMemberInfo {
     fn from(member: RemoteMemberInfoWire) -> Self {
         Self {
             member_id: member.member_id,
+            display_name: member.display_name,
             role: member.role,
             last_acknowledged_revision: member.last_acknowledged_revision,
             ack_status: member.ack_status,

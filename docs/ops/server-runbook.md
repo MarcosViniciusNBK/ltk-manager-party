@@ -178,7 +178,7 @@ curl http://177.153.59.168:3000/ready
 ```bash
 curl -X POST http://177.153.59.168:3000/v1/rooms \
   -H "Content-Type: application/json" \
-  -d '{"room_id":"minha-sala","password":"senha-secreta","game_build":"14.1.1"}'
+  -d '{"room_id":"minha-sala","password":"senha-secreta","game_build":"14.1.1","display_name":"DESKTOP-ANA"}'
 # Resposta (201 Created):
 # {"room_id":"minha-sala","member_id":"owner-...","owner_token":"<hash-owner>","member_token":"<hash-member>","role":"owner"}
 ```
@@ -188,9 +188,9 @@ curl -X POST http://177.153.59.168:3000/v1/rooms \
 ```bash
 curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/join \
   -H "Content-Type: application/json" \
-  -d '{"password":"senha-secreta","member_id":"convidado-1"}'
+  -d '{"password":"senha-secreta","display_name":"DESKTOP-BRUNO"}'
 # Resposta (200 OK):
-# {"room_id":"minha-sala","member_id":"convidado-1","member_token":"<hash>","role":"member","revision":0}
+# {"room_id":"minha-sala","member_id":"member-...","member_token":"<hash>","role":"member","revision":0}
 ```
 
 ### Publicar Manifesto com CAS (Compare-and-Swap - Qualquer Membro Autenticado)
@@ -202,7 +202,7 @@ curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/manifest \
   -d '{
     "previous_revision": 0,
     "manifest": {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "roomId": "minha-sala",
       "revision": 1,
       "gameBuild": "14.1.1",
@@ -213,6 +213,7 @@ curl -X POST http://177.153.59.168:3000/v1/rooms/minha-sala/manifest \
           "format": "modpkg",
           "displayName": "Lux Custom Skin",
           "version": "1.0.0",
+          "enabled": true,
           "suggestedLayers": ["Default"]
         }
       ]
@@ -241,8 +242,8 @@ curl http://177.153.59.168:3000/v1/rooms/minha-sala/members \
   -H "Authorization: Bearer <token>"
 # Resposta (200 OK):
 # [
-#   {"member_id":"owner-8e7f8484","role":"owner","last_acknowledged_revision":1,"ack_status":"synchronized","joined_at":"...","last_seen_at":"...","is_online":true,"is_stale":false},
-#   {"member_id":"convidado-1","role":"member","last_acknowledged_revision":1,"ack_status":"synchronized","joined_at":"...","last_seen_at":"...","is_online":true,"is_stale":false}
+#   {"member_id":"owner-8e7f8484","display_name":"DESKTOP-ANA","role":"owner","last_acknowledged_revision":1,"ack_status":"synchronized","joined_at":"...","last_seen_at":"...","is_online":true,"is_stale":false},
+#   {"member_id":"member-...","display_name":"DESKTOP-BRUNO","role":"member","last_acknowledged_revision":1,"ack_status":"synchronized","joined_at":"...","last_seen_at":"...","is_online":true,"is_stale":false}
 # ]
 ```
 

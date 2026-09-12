@@ -104,6 +104,7 @@ export function RoomDetail({ roomId }: { roomId: string }) {
       publishProgress.stage !== "complete" &&
       publishProgress.stage !== "failed");
   const publicationVisible = publicationActive || publishProgress?.stage === "failed";
+  const confirmedUploads = publishProgress?.completedMods ?? 0;
 
   function leave() {
     leaveRoom.mutate(roomId, {
@@ -254,22 +255,28 @@ export function RoomDetail({ roomId }: { roomId: string }) {
                 ? publishProgressLabel(publishProgress)
                 : m.rooms_publish_progress_preparing()}
             </p>
-            {Object.values(uploadProgress).map((transfer) => {
+            {publishProgress?.stage === "uploading" && Object.keys(uploadProgress).length === 0 && (
+              <p className="text-xs text-surface-400">{m.rooms_upload_waiting_for_transfer()}</p>
+            )}
+            {Object.values(uploadProgress).map((transfer, index) => {
               const uploaded = Number(transfer.transferredBytes);
               const total = Number(transfer.totalBytes);
               const percent = total > 0 ? Math.min(100, Math.round((uploaded / total) * 100)) : 0;
+              const confirmed = index < confirmedUploads || publishProgress?.stage === "complete";
               return (
                 <Progress.Root
                   key={transfer.contentHash}
                   value={percent}
                   label={transfer.displayName ?? transfer.contentHash.slice(0, 12)}
                   valueLabel={
-                    uploaded >= total
+                    confirmed
                       ? m.rooms_upload_ready()
-                      : m.rooms_upload_progress_value({
-                          uploaded: formatBytes(uploaded),
-                          total: formatBytes(total),
-                        })
+                      : uploaded >= total
+                        ? m.rooms_upload_waiting_verification()
+                        : m.rooms_upload_progress_value({
+                            uploaded: formatBytes(uploaded),
+                            total: formatBytes(total),
+                          })
                   }
                 >
                   <Progress.Track size="sm">
@@ -278,6 +285,31 @@ export function RoomDetail({ roomId }: { roomId: string }) {
                 </Progress.Root>
               );
             })}
+            {publishProgress?.stage === "uploading" &&
+              Object.values(uploadProgress).some(
+                (transfer) => Number(transfer.transferredBytes) === 0,
+              ) && (
+                <p className="text-xs text-surface-400">
+                  {m.rooms_upload_starting({
+                    mod:
+                      Object.values(uploadProgress).find(
+                        (transfer) => Number(transfer.transferredBytes) === 0,
+                      )?.displayName ?? m.rooms_upload_selected_mod(),
+                  })}
+                </p>
+              )}
+            {publishProgress?.stage === "failed" && (
+              <div className="space-y-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3">
+                <p className="text-sm font-medium text-red-200">
+                  {publishProfile.error
+                    ? errorMessage(publishProfile.error)
+                    : m.rooms_publish_failed_help()}
+                </p>
+                <Button size="sm" variant="outline" onClick={retry} loading={retrySync.isPending}>
+                  {m.rooms_refresh_action()}
+                </Button>
+              </div>
+            )}
           </div>
         )}
         <p className="text-xs text-surface-500">{m.rooms_apply_safety_note()}</p>
@@ -341,7 +373,10 @@ export function RoomDetail({ roomId }: { roomId: string }) {
                         <p className="truncate text-sm font-medium text-surface-100">
                           {mod.displayName}
                         </p>
-                        <p className="text-xs text-surface-400">{mod.version || mod.format}</p>
+                        <p className="text-xs text-surface-400">
+                          {mod.version || mod.format} ·{" "}
+                          {mod.enabled ? m.rooms_mod_enabled() : m.rooms_mod_disabled()}
+                        </p>
                       </div>
                       <span className="shrink-0 text-xs text-surface-400">
                         {formatBytes(Number(mod.sizeBytes))}
@@ -385,6 +420,7 @@ export function RoomDetail({ roomId }: { roomId: string }) {
           <div className="space-y-2">
             {members.map((member: RemoteMemberInfo) => {
               const isYou = membership?.memberId === member.memberId;
+              const memberName = member.displayName || member.memberId.slice(0, 12);
               return (
                 <div
                   key={member.memberId}
@@ -396,7 +432,7 @@ export function RoomDetail({ roomId }: { roomId: string }) {
                     />
                     <div className="min-w-0">
                       <p className="truncate font-mono text-xs text-surface-100">
-                        {isYou ? m.rooms_member_you() : member.memberId.slice(0, 12)}
+                        {isYou ? `${memberName} (${m.rooms_member_you()})` : memberName}
                       </p>
                       <p className="text-xs text-surface-400">
                         rev {member.lastAcknowledgedRevision}

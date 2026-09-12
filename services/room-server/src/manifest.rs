@@ -3,7 +3,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Schema 2 makes the whole-mod enabled state authoritative across all members.
+///
+/// The service deliberately rejects new schema 1 publications: an old desktop client would not
+/// understand a disabled mod and could silently turn it back on for everyone.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 pub const MAX_MODS_PER_ROOM: usize = 256;
 pub const MAX_MOD_SIZE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 pub const MAX_TOTAL_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
@@ -24,8 +28,14 @@ pub struct RoomMod {
     pub format: RoomModFormat,
     pub display_name: String,
     pub version: String,
+    #[serde(default = "default_room_mod_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub suggested_layers: Vec<String>,
+}
+
+fn default_room_mod_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,7 +188,7 @@ mod tests {
     #[test]
     fn test_valid_manifest() {
         let manifest = RoomManifest {
-            schema_version: 1,
+            schema_version: CURRENT_SCHEMA_VERSION,
             room_id: "test-room".to_string(),
             revision: 1,
             game_build: Some("14.1.1".to_string()),
@@ -188,6 +198,7 @@ mod tests {
                 format: RoomModFormat::Modpkg,
                 display_name: "Test Mod".to_string(),
                 version: "1.0.0".to_string(),
+                enabled: true,
                 suggested_layers: vec!["Default".to_string()],
             }],
         };
@@ -198,7 +209,7 @@ mod tests {
     #[test]
     fn test_invalid_hash() {
         let manifest = RoomManifest {
-            schema_version: 1,
+            schema_version: CURRENT_SCHEMA_VERSION,
             room_id: "test-room".to_string(),
             revision: 1,
             game_build: None,
@@ -208,6 +219,7 @@ mod tests {
                 format: RoomModFormat::Fantome,
                 display_name: "Test Mod".to_string(),
                 version: "1.0.0".to_string(),
+                enabled: true,
                 suggested_layers: vec![],
             }],
         };
@@ -218,7 +230,7 @@ mod tests {
     #[test]
     fn test_duplicate_content_hashes_rejected() {
         let manifest = RoomManifest {
-            schema_version: 1,
+            schema_version: CURRENT_SCHEMA_VERSION,
             room_id: "test-room".to_string(),
             revision: 1,
             game_build: None,
@@ -229,6 +241,7 @@ mod tests {
                     format: RoomModFormat::Modpkg,
                     display_name: "Mod 1".to_string(),
                     version: "1.0".to_string(),
+                    enabled: true,
                     suggested_layers: vec![],
                 },
                 RoomMod {
@@ -237,6 +250,7 @@ mod tests {
                     format: RoomModFormat::Fantome,
                     display_name: "Mod 2".to_string(),
                     version: "1.0".to_string(),
+                    enabled: true,
                     suggested_layers: vec![],
                 },
             ],
@@ -250,7 +264,7 @@ mod tests {
     #[test]
     fn test_duplicate_layers_rejected() {
         let manifest = RoomManifest {
-            schema_version: 1,
+            schema_version: CURRENT_SCHEMA_VERSION,
             room_id: "test-room".to_string(),
             revision: 1,
             game_build: None,
@@ -260,6 +274,7 @@ mod tests {
                 format: RoomModFormat::Modpkg,
                 display_name: "Mod 1".to_string(),
                 version: "1.0".to_string(),
+                enabled: true,
                 suggested_layers: vec!["LayerA".to_string(), "LayerA".to_string()],
             }],
         };
@@ -272,7 +287,7 @@ mod tests {
     #[test]
     fn test_revision_and_room_mismatch() {
         let manifest = RoomManifest {
-            schema_version: 1,
+            schema_version: CURRENT_SCHEMA_VERSION,
             room_id: "room-a".to_string(),
             revision: 2,
             game_build: None,
@@ -282,5 +297,27 @@ mod tests {
         assert!(manifest.validate("room-b", 2).is_err());
         assert!(manifest.validate("room-a", 3).is_err());
         assert!(manifest.validate("room-a", 2).is_ok());
+    }
+
+    #[test]
+    fn legacy_payload_defaults_enabled_but_old_publish_schema_is_rejected() {
+        let payload = serde_json::json!({
+            "contentHash": "a".repeat(64),
+            "sizeBytes": 1,
+            "format": "modpkg",
+            "displayName": "Legacy mod",
+            "version": "1.0"
+        });
+        let legacy_mod: RoomMod = serde_json::from_value(payload).unwrap();
+        assert!(legacy_mod.enabled);
+
+        let old_manifest = RoomManifest {
+            schema_version: 1,
+            room_id: "test-room".to_string(),
+            revision: 1,
+            game_build: None,
+            mods: vec![],
+        };
+        assert!(old_manifest.validate("test-room", 1).is_err());
     }
 }

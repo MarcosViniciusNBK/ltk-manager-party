@@ -5,7 +5,7 @@ pub mod updates;
 pub mod version;
 pub mod ws;
 
-use axum::routing::{get, head, post};
+use axum::routing::{get, head, post, put};
 use axum::Router;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
@@ -28,6 +28,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/v1/rooms", post(rooms::create_room))
         .route("/v1/rooms/{room_id}", get(rooms::get_room_info))
         .route("/v1/rooms/{room_id}/join", post(rooms::join_room))
+        .route(
+            "/v1/rooms/{room_id}/member",
+            put(rooms::update_member_display_name),
+        )
         .route(
             "/v1/rooms/{room_id}/manifest",
             post(rooms::publish_manifest).get(rooms::get_latest_manifest),
@@ -58,8 +62,9 @@ pub fn create_router(state: AppState) -> Router {
         ));
 
     let transfer_routes = Router::new()
-        // Blob bodies may legitimately take hours on slow connections. Size and authorization
-        // are validated before streaming, while clients can resume at the persisted offset.
+        // Blob bodies may legitimately take hours on slow connections. Each upload body has its
+        // own no-progress timeout, so a dead connection cannot hold a blob lock indefinitely
+        // while an active slow transfer remains resumable.
         .route(
             "/v1/blobs/upload/{content_hash}",
             head(blobs::probe_upload_blob).put(blobs::put_upload_blob),
@@ -67,11 +72,7 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/v1/blobs/download/{content_hash}",
             head(blobs::probe_download_blob).get(blobs::get_download_blob),
-        )
-        .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(6 * 60 * 60),
-        ));
+        );
 
     let websocket_routes = Router::new().route("/v1/rooms/{room_id}/ws", get(ws::ws_handler));
 

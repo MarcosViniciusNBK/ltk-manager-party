@@ -168,6 +168,7 @@ mod tests {
                     format: artifact.format,
                     display_name: format!("Room Mod {index}"),
                     version: String::new(),
+                    enabled: true,
                     suggested_layers: Vec::new(),
                 })
                 .collect(),

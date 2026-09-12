@@ -15,6 +15,11 @@ displayName: string,
  */
 version: string, 
 /**
+ * Whether this room profile enables the mod. Disabled mods remain part of the manifest so
+ * every member keeps the same profile state without re-downloading them on re-enable.
+ */
+enabled: boolean,
+/**
  * A suggestion for an explicit future local import action, not an instruction to apply it.
  */
 suggestedLayers: Array<string>, };

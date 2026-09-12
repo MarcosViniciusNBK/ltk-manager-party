@@ -15,6 +15,8 @@ pub struct CreateRoomRequest {
     pub room_id: String,
     pub password: String,
     pub game_build: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,6 +32,8 @@ pub struct CreateRoomResponse {
 pub struct JoinRoomRequest {
     pub password: String,
     pub member_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +86,7 @@ pub struct AckRevisionResponse {
 #[derive(Debug, Serialize)]
 pub struct MemberInfo {
     pub member_id: String,
+    pub display_name: String,
     pub role: String,
     pub last_acknowledged_revision: i64,
     pub ack_status: String,
@@ -102,6 +107,16 @@ pub struct TransferOwnerResponse {
     pub room_id: String,
     pub previous_owner: String,
     pub new_owner: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMemberRequest {
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateMemberResponse {
+    pub success: bool,
 }
 
 /// Create a new room with password protection and receive authoritative owner and member tokens.
@@ -161,6 +176,7 @@ pub async fn create_room(
     let owner_token = generate_high_entropy_token();
     let member_token = generate_high_entropy_token();
     let owner_member_id = format!("owner-{}", &owner_token[..8]);
+    let owner_display_name = normalize_display_name(payload.display_name, &owner_member_id)?;
 
     let mut tx = state.db.begin().await.map_err(|e| {
         (
@@ -203,11 +219,12 @@ pub async fn create_room(
     .map_err(db_error)?;
 
     sqlx::query(
-        "INSERT INTO room_members (room_id, member_id, member_token, role, last_acknowledged_revision, ack_status) \
-         VALUES ($1, $2, $3, 'owner', 0, 'synchronized')",
+        "INSERT INTO room_members (room_id, member_id, display_name, member_token, role, last_acknowledged_revision, ack_status) \
+         VALUES ($1, $2, $3, $4, 'owner', 0, 'synchronized')",
     )
     .bind(&room_id)
     .bind(&owner_member_id)
+    .bind(&owner_display_name)
     .bind(&member_token)
     .execute(&mut *tx)
     .await
@@ -313,14 +330,16 @@ pub async fn join_room(
         .member_id
         .filter(|m| !m.trim().is_empty())
         .unwrap_or_else(|| format!("member-{}", &member_token[..8]));
+    let display_name = normalize_display_name(payload.display_name, &member_id)?;
 
     sqlx::query(
-        "INSERT INTO room_members (room_id, member_id, member_token, role, last_acknowledged_revision, ack_status, last_seen_at) \
-         VALUES ($1, $2, $3, 'member', 0, 'joined', NOW()) \
-         ON CONFLICT (room_id, member_id) DO UPDATE SET member_token = $3, last_seen_at = NOW()",
+        "INSERT INTO room_members (room_id, member_id, display_name, member_token, role, last_acknowledged_revision, ack_status, last_seen_at) \
+         VALUES ($1, $2, $3, $4, 'member', 0, 'joined', NOW()) \
+         ON CONFLICT (room_id, member_id) DO UPDATE SET display_name = $3, member_token = $4, last_seen_at = NOW()",
     )
     .bind(&room_id)
     .bind(&member_id)
+    .bind(&display_name)
     .bind(&member_token)
     .execute(&state.db)
     .await
@@ -337,7 +356,8 @@ pub async fn join_room(
         room_id: room_id.clone(),
         event_type: "member_joined".to_string(),
         payload: serde_json::json!({
-            "member_id": member_id,
+            "member_id": member_id.clone(),
+            "display_name": display_name.clone(),
             "role": "member",
         }),
     });
@@ -362,6 +382,54 @@ pub async fn join_room(
         role: "member",
         revision,
     }))
+}
+
+/// Update the visible computer name for an authenticated membership. The opaque member ID remains
+/// the authorization key, so duplicate hostnames cannot overwrite another user.
+pub async fn update_member_display_name(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateMemberRequest>,
+) -> Result<Json<UpdateMemberResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let token = extract_token(&headers)?;
+    let (member_id, role) = authenticate_room_actor(&state, &room_id, &token).await?;
+    let display_name = normalize_display_name(Some(payload.display_name), &member_id)?;
+
+    sqlx::query(
+        "UPDATE room_members SET display_name = $1, last_seen_at = NOW() \
+         WHERE room_id = $2 AND member_id = $3",
+    )
+    .bind(&display_name)
+    .bind(&room_id)
+    .bind(&member_id)
+    .execute(&state.db)
+    .await
+    .map_err(db_error)?;
+
+    let channel = state.get_or_create_room_channel(&room_id).await;
+    let _ = channel.send(RoomEvent {
+        room_id: room_id.clone(),
+        event_type: "member_updated".to_string(),
+        payload: serde_json::json!({
+            "member_id": member_id.clone(),
+            "display_name": display_name.clone(),
+            "role": role.clone(),
+        }),
+    });
+
+    record_audit_event(
+        &state.db,
+        &room_id,
+        &member_id,
+        &role,
+        "member_display_name_updated",
+        None,
+        None,
+    )
+    .await;
+
+    Ok(Json(UpdateMemberResponse { success: true }))
 }
 
 /// Retrieve room metadata, requiring a valid member or owner token in the Authorization header.
@@ -811,12 +879,13 @@ pub async fn get_room_members(
     let members: Vec<(
         String,
         String,
+        String,
         i64,
         String,
         chrono::DateTime<chrono::Utc>,
         chrono::DateTime<chrono::Utc>,
     )> = sqlx::query_as(
-        "SELECT member_id, role, last_acknowledged_revision, ack_status, joined_at, last_seen_at \
+        "SELECT member_id, display_name, role, last_acknowledged_revision, ack_status, joined_at, last_seen_at \
          FROM room_members \
          WHERE room_id = $1 \
          ORDER BY (role = 'owner') DESC, joined_at ASC",
@@ -830,13 +899,15 @@ pub async fn get_room_members(
     let now = chrono::Utc::now();
     let stale_threshold = chrono::Duration::minutes(5);
 
-    for (member_id, role, last_ack, ack_status, joined_at, last_seen_at) in members {
+    for (member_id, display_name, role, last_ack, ack_status, joined_at, last_seen_at) in members {
         let is_connected = state.is_member_connected(&room_id, &member_id).await;
         let is_recent = (now - last_seen_at) < stale_threshold;
         let is_online = is_connected || is_recent;
+        let display_name = display_name_or_fallback(&display_name, &member_id);
 
         result.push(MemberInfo {
             member_id,
+            display_name,
             role,
             last_acknowledged_revision: last_ack,
             ack_status,
@@ -1084,6 +1155,39 @@ async fn authenticate_room_actor(
             }),
         )
     })
+}
+
+fn normalize_display_name(
+    requested: Option<String>,
+    fallback: &str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let display_name = requested
+        .unwrap_or_else(|| fallback.to_string())
+        .trim()
+        .to_string();
+    if display_name.is_empty()
+        || display_name.chars().count() > 64
+        || display_name.chars().any(char::is_control)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Computer name must contain 1 to 64 non-control characters".to_string(),
+                code: "INVALID_DISPLAY_NAME".to_string(),
+                details: None,
+            }),
+        ));
+    }
+    Ok(display_name)
+}
+
+fn display_name_or_fallback(display_name: &str, fallback: &str) -> String {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        fallback.to_string()
+    } else {
+        display_name.to_string()
+    }
 }
 
 pub fn extract_token(headers: &HeaderMap) -> Result<String, (StatusCode, Json<ErrorResponse>)> {

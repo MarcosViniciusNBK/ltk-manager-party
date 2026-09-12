@@ -418,6 +418,7 @@ fn classify_network_error(detail: &str) -> RoomSyncErrorReason {
             | "INVALID_SIZE"
             | "INVALID_MANIFEST",
         ) => RoomSyncErrorReason::IntegrityCheckFailed,
+        Some("UPLOAD_IDLE_TIMEOUT") => RoomSyncErrorReason::RequestTimedOut,
         Some(
             "DATABASE_ERROR"
             | "HASHING_ERROR"
@@ -457,6 +458,10 @@ mod tests {
         assert_eq!(
             classify_network_error("error sending request for url"),
             RoomSyncErrorReason::ServerUnavailable
+        );
+        assert_eq!(
+            classify_network_error(r#"Failed to upload blob: {"code":"UPLOAD_IDLE_TIMEOUT"}"#),
+            RoomSyncErrorReason::RequestTimedOut
         );
         assert_eq!(
             classify_network_error("Missing member_token"),

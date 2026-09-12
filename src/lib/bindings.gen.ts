@@ -1121,6 +1121,7 @@ export type PropertyKind = "none" | "bool" | "i8" | "u8" | "i16" | "u16" | "i32"
 /**  Remote member presence information from the room server. */
 export type RemoteMemberInfo = {
 	memberId: string,
+	displayName: string,
 	role: string,
 	lastAcknowledgedRevision: number,
 	ackStatus: string,
@@ -1184,6 +1185,11 @@ export type RoomMod = {
 	displayName: string,
 	/**  Display-only source version. */
 	version: string,
+	/**
+	 *  Whether this room profile enables the mod. Disabled mods remain part of the manifest so
+	 *  every member keeps the same profile state without re-downloading them on re-enable.
+	 */
+	enabled?: boolean,
 	/**  A suggestion for an explicit future local import action, not an instruction to apply it. */
 	suggestedLayers?: string[],
 };

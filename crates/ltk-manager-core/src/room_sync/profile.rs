@@ -58,6 +58,7 @@ pub fn create_or_update_room_profile(
         };
         specs.push(RoomProfileModSpec {
             local_mod_id: local_mod_id.clone(),
+            enabled: room_mod.enabled,
             enabled_layers: room_mod.suggested_layers.clone(),
         });
     }
@@ -127,6 +128,7 @@ mod tests {
                     format: artifact.format,
                     display_name: format!("Room Mod {index}"),
                     version: String::new(),
+                    enabled: true,
                     suggested_layers: Vec::new(),
                 })
                 .collect(),
@@ -258,6 +260,7 @@ mod tests {
         let mut revision_two = manifest(2, &[layered, first]);
         revision_two.mods[0].suggested_layers = Vec::new();
         revision_two.mods[1].suggested_layers = vec!["base".to_string()];
+        revision_two.mods[1].enabled = false;
         store
             .accept_verified_manifest(&cache, &revision_two, ManifestLimits::default())
             .unwrap();
@@ -286,7 +289,7 @@ mod tests {
         assert_eq!(updated.profile.id, first_profile.profile.id);
         assert_eq!(updated.revision, 2);
         assert_eq!(updated.profile.mod_order, expected_two);
-        assert_eq!(updated.profile.enabled_mods, expected_two);
+        assert_eq!(updated.profile.enabled_mods, vec![expected_two[0].clone()]);
         assert_eq!(
             updated.profile.layer_states.get(layered_id).unwrap(),
             &std::collections::HashMap::from([
@@ -317,7 +320,7 @@ mod tests {
             .find(|profile| profile.id == updated.profile.id)
             .unwrap();
         assert_eq!(persisted.mod_order, expected_two);
-        assert_eq!(persisted.enabled_mods, expected_two);
+        assert_eq!(persisted.enabled_mods, vec![expected_two[0].clone()]);
     }
 
     #[test]
