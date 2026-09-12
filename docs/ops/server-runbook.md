@@ -76,6 +76,10 @@ O serviço foi instalado em `/opt/ltk-room-server`:
 > [!NOTE]
 > O servidor já possui um Nginx ativo nas portas 80 e 443 atendendo o site `mag.horuzprod.com`. O `ltk-room-server` roda na porta `3000`, mantendo total isolamento sem interferir nos sites existentes.
 
+O endpoint público oficial é `https://mag.horuzprod.com/ltk-rooms`. O Nginx remove esse prefixo
+antes de encaminhar para a porta 3000 e mantém suporte a WebSocket e transferências longas. A porta
+3000 continua útil apenas para diagnóstico administrativo direto.
+
 ---
 
 ## 4. Comandos de Operação e Manutenção
@@ -117,6 +121,25 @@ docker compose restart
 ```bash
 docker compose up -d --build
 ```
+
+### Publicar uma atualização assinada do aplicativo
+
+O backend hospeda atualizações no volume somente-leitura `/data/updates`. A chave privada do Tauri
+nunca deve ir para a VPS: o artefato é assinado na máquina de build e enviado de forma atômica pelo
+script `scripts/publish-room-update.ps1`.
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$env:USERPROFILE\.tauri\ltk-manager-party.key"
+pnpm tauri build --bundles nsis
+./scripts/publish-room-update.ps1 `
+  -Version 1.20.0 `
+  -ArtifactPath ./target/release/bundle/nsis/LTK-Manager_1.20.0_x64-setup.exe `
+  -Notes 'Resumo das alterações'
+```
+
+O script exige o `.sig` criado pelo Tauri ao lado do instalador, envia primeiro o artefato imutável
+e substitui `latest.json` por último. Clientes consultam automaticamente
+`/v1/updates/{target}/{arch}/{current_version}` no início, ao voltar ao aplicativo e a cada hora.
 
 ### Acessar o Banco de Dados PostgreSQL (CLI `psql`)
 

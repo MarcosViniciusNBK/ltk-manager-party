@@ -41,6 +41,36 @@ pub struct RoomPublishProgress {
     pub total_mods: usize,
 }
 
+/// What the room worker is doing right now. Unlike transfer progress, this also covers the
+/// otherwise invisible periods spent checking the room and rebuilding its local profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS, specta::Type))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub enum RoomActivityStage {
+    Idle,
+    Checking,
+    Preparing,
+    Uploading,
+    Publishing,
+    Downloading,
+    UpdatingProfile,
+    Complete,
+    Failed,
+}
+
+/// Observable room-worker state. Timestamps are Unix milliseconds and let the renderer explain
+/// whether a completed/failed status is fresh without receiving paths or transport credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS, specta::Type))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct RoomActivity {
+    pub room_id: String,
+    pub stage: RoomActivityStage,
+    pub updated_at_ms: u64,
+}
+
 /// The launcher's payloads are defined alongside the code that produces them,
 /// and re-exported here so every payload in the registry below can be named
 /// from one module.
@@ -475,6 +505,8 @@ declare_events! {
     RoomTransferProgress(TransferProgress) => "room-transfer-progress",
     /// A shared room profile publication moved to another stage.
     RoomPublishProgress(RoomPublishProgress) => "room-publish-progress",
+    /// The room worker started, advanced, or finished an observable activity.
+    RoomActivityChanged(RoomActivity) => "room-activity-changed",
     /// A room member joined or left. Emitted at a bounded rate by the desktop room state.
     RoomPresenceChanged(RoomPresenceChanged) => "room-presence-changed",
 }

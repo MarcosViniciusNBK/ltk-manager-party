@@ -119,6 +119,11 @@ impl ModLibrary {
             index.mods.iter().map(|m| m.id.clone()).collect();
         let _ = self.wad_reports.0.lock().prune_orphans(&valid_ids);
         self.stamp_mutation();
+        // This is the authoritative, immediate signal for every in-process library mutation.
+        // The sink is explicitly non-blocking, so emitting while the index guard is alive is safe;
+        // room synchronization uses it to react without a polling delay.
+        self.events
+            .emit(crate::events::BackendEvent::LibraryChanged);
         Ok(result)
     }
 

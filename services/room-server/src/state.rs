@@ -2,6 +2,7 @@
 
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, MutexGuard, RwLock};
 
@@ -15,6 +16,8 @@ pub struct AppState {
     pub active_connections: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub rate_limiter: RateLimiter,
     pub storage: StorageManager,
+    pub updates_dir: PathBuf,
+    pub public_server_url: String,
     upload_locks: Arc<Vec<Mutex<()>>>,
 }
 
@@ -26,13 +29,20 @@ pub struct RoomEvent {
 }
 
 impl AppState {
-    pub fn new(db: PgPool, storage: StorageManager) -> Self {
+    pub fn new(
+        db: PgPool,
+        storage: StorageManager,
+        updates_dir: PathBuf,
+        public_server_url: String,
+    ) -> Self {
         Self {
             db,
             rooms: Arc::new(RwLock::new(HashMap::new())),
             active_connections: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: RateLimiter::default(),
             storage,
+            updates_dir,
+            public_server_url,
             upload_locks: Arc::new((0..256).map(|_| Mutex::new(())).collect()),
         }
     }

@@ -28,6 +28,15 @@ fn event_names_are_stable() {
 fn payload_carrying_event_names_are_stable() {
     assert_eq!(BackendEvent::LibraryChanged.name(), "library-changed");
     assert_eq!(
+        BackendEvent::RoomActivityChanged(RoomActivity {
+            room_id: "room-a".to_string(),
+            stage: RoomActivityStage::Checking,
+            updated_at_ms: 1,
+        })
+        .name(),
+        "room-activity-changed"
+    );
+    assert_eq!(
         BackendEvent::InstallProgress(InstallProgress {
             current: 1,
             total: 2,

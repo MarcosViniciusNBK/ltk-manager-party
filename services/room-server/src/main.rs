@@ -82,10 +82,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let storage_secret = storage_secret.into_bytes();
     let public_url = std::env::var("PUBLIC_SERVER_URL")
-        .unwrap_or_else(|_| "http://177.153.59.168:3000".to_string());
+        .unwrap_or_else(|_| "https://mag.horuzprod.com/ltk-rooms".to_string());
+    let updates_dir = std::env::var("UPDATES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/data/updates"));
+    std::fs::create_dir_all(&updates_dir)?;
 
     info!(path = ?storage_dir, url = %public_url, "Initializing Content-Addressed Storage...");
-    let storage = StorageManager::new(storage_dir, storage_secret, public_url)?;
+    let storage = StorageManager::new(storage_dir, storage_secret, public_url.clone())?;
 
     // Background maintenance worker: prune expired rooms periodically
     let pool_cleanup = pool.clone();
@@ -143,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let state = AppState::new(pool, storage);
+    let state = AppState::new(pool, storage, updates_dir, public_url);
 
     let app = routes::create_router(state).layer(TraceLayer::new_for_http());
 

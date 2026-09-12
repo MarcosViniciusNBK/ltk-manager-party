@@ -1,6 +1,7 @@
 pub mod blobs;
 pub mod health;
 pub mod rooms;
+pub mod updates;
 pub mod version;
 pub mod ws;
 
@@ -16,6 +17,14 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health", get(health::health_check))
         .route("/ready", get(health::readiness_check))
         .route("/v1/version", get(version::get_version))
+        .route(
+            "/v1/updates/{target}/{arch}/{current_version}",
+            get(updates::check_update),
+        )
+        .route(
+            "/v1/updates/files/{file_name}",
+            get(updates::download_update),
+        )
         .route("/v1/rooms", post(rooms::create_room))
         .route("/v1/rooms/{room_id}", get(rooms::get_room_info))
         .route("/v1/rooms/{room_id}/join", post(rooms::join_room))

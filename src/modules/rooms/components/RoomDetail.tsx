@@ -18,11 +18,12 @@ import {
   Progress,
   SectionCard,
   SelectField,
+  Spinner,
   useToast,
 } from "@/components";
 import { errorMessage, errorTitle, m } from "@/i18n";
 import type { RoomPublishProgress, TransferProgress } from "@/lib/bindings";
-import type { RemoteMemberInfo } from "@/lib/bindings.gen";
+import type { RemoteMemberInfo, RoomActivityStage } from "@/lib/bindings.gen";
 import { useTauriEvent } from "@/lib/useTauriEvent";
 import { useActiveProfile, useProfiles } from "@/modules/library";
 import { formatBytes } from "@/utils";
@@ -68,6 +69,8 @@ export function RoomDetail({ roomId }: { roomId: string }) {
   const progress = snapshot?.totalBlobs
     ? Math.round((snapshot.verifiedBlobs / snapshot.totalBlobs) * 100)
     : 0;
+  const activity = localStatus?.activity;
+  const activityActive = activity ? isRoomActivityActive(activity.stage) : false;
 
   useEffect(() => {
     if (!recoveryProfileId && activeProfile) setRecoveryProfileId(activeProfile.id);
@@ -192,6 +195,30 @@ export function RoomDetail({ roomId }: { roomId: string }) {
               {m.rooms_open_mods_action()}
             </Button>
           </div>
+        </div>
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-surface-700/70 bg-surface-800/40 px-4 py-3">
+          <div className="flex min-w-0 items-center gap-3">
+            {activityActive ? (
+              <Spinner size="sm" className="text-primary-300" />
+            ) : activity?.stage === "failed" ? (
+              <WarningCircleIcon weight="fill" className="h-4 w-4 shrink-0 text-red-400" />
+            ) : (
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-400" />
+            )}
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-surface-100">
+                {roomActivityLabel(activity?.stage ?? "idle")}
+              </p>
+              <p className="text-xs text-surface-400">
+                {roomActivityDescription(activity?.stage ?? "idle")}
+              </p>
+            </div>
+          </div>
+          {activity && (
+            <span className="shrink-0 text-xs text-surface-500">
+              {new Date(activity.updatedAtMs).toLocaleTimeString()}
+            </span>
+          )}
         </div>
         {!workflow.profileReady && (
           <div className="space-y-2">
@@ -390,6 +417,63 @@ export function RoomDetail({ roomId }: { roomId: string }) {
       </div>
     </div>
   );
+}
+
+function isRoomActivityActive(stage: RoomActivityStage): boolean {
+  return [
+    "checking",
+    "preparing",
+    "uploading",
+    "publishing",
+    "downloading",
+    "updatingProfile",
+  ].includes(stage);
+}
+
+function roomActivityLabel(stage: RoomActivityStage): string {
+  switch (stage) {
+    case "idle":
+      return m.rooms_activity_idle_title();
+    case "checking":
+      return m.rooms_activity_checking_title();
+    case "preparing":
+      return m.rooms_activity_preparing_title();
+    case "uploading":
+      return m.rooms_activity_uploading_title();
+    case "publishing":
+      return m.rooms_activity_publishing_title();
+    case "downloading":
+      return m.rooms_activity_downloading_title();
+    case "updatingProfile":
+      return m.rooms_activity_profile_title();
+    case "complete":
+      return m.rooms_activity_complete_title();
+    case "failed":
+      return m.rooms_activity_failed_title();
+  }
+}
+
+function roomActivityDescription(stage: RoomActivityStage): string {
+  switch (stage) {
+    case "idle":
+      return m.rooms_activity_idle_description();
+    case "checking":
+      return m.rooms_activity_checking_description();
+    case "preparing":
+      return m.rooms_activity_preparing_description();
+    case "uploading":
+      return m.rooms_activity_uploading_description();
+    case "publishing":
+      return m.rooms_activity_publishing_description();
+    case "downloading":
+      return m.rooms_activity_downloading_description();
+    case "updatingProfile":
+      return m.rooms_activity_profile_description();
+    case "complete":
+      return m.rooms_activity_complete_description();
+    case "failed":
+      return m.rooms_activity_failed_description();
+  }
 }
 
 function publishProgressLabel(progress: RoomPublishProgress): string {

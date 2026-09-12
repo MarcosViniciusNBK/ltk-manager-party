@@ -23,10 +23,31 @@ export function useUpdateCheck({ checkOnMount = true, delayMs = 3000 } = {}) {
     }
     if (!checkOnMount) return;
 
-    const timeoutId = setTimeout(() => {
-      checkForUpdate();
-    }, delayMs);
+    let lastCheckAt = Date.now();
+    const checkIfAvailable = (force = false) => {
+      const state = useUpdaterStore.getState();
+      if (state.checking || state.updating || state.update) return;
+      if (!force && Date.now() - lastCheckAt < 15 * 60 * 1000) return;
+      lastCheckAt = Date.now();
+      void checkForUpdate();
+    };
 
-    return () => clearTimeout(timeoutId);
+    const timeoutId = setTimeout(() => checkIfAvailable(true), delayMs);
+    // Keep long-running instances current too. Focus/visibility checks make a resumed laptop react
+    // promptly, while the interval is only a defensive fallback and never overlaps another check.
+    const intervalId = window.setInterval(() => checkIfAvailable(), 60 * 60 * 1000);
+    const checkWhenVisible = () => {
+      if (document.visibilityState === "visible") checkIfAvailable();
+    };
+    const checkOnFocus = () => checkIfAvailable();
+    window.addEventListener("focus", checkOnFocus);
+    document.addEventListener("visibilitychange", checkWhenVisible);
+
+    return () => {
+      clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", checkOnFocus);
+      document.removeEventListener("visibilitychange", checkWhenVisible);
+    };
   }, [checkOnMount, delayMs, checkForUpdate]);
 }

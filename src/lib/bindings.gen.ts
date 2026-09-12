@@ -1128,6 +1128,22 @@ export type RemoteMemberInfo = {
 	isStale: boolean,
 };
 
+/**
+ *  Observable room-worker state. Timestamps are Unix milliseconds and let the renderer explain
+ *  whether a completed/failed status is fresh without receiving paths or transport credentials.
+ */
+export type RoomActivity = {
+	roomId: string,
+	stage: RoomActivityStage,
+	updatedAtMs: number,
+};
+
+/**
+ *  What the room worker is doing right now. Unlike transfer progress, this also covers the
+ *  otherwise invisible periods spent checking the room and rebuilding its local profile.
+ */
+export type RoomActivityStage = "idle" | "checking" | "preparing" | "uploading" | "publishing" | "downloading" | "updatingProfile" | "complete" | "failed";
+
 /**  Cache facts suitable for IPC. File paths and room credentials never cross this boundary. */
 export type RoomCacheStatus = {
 	joinedRooms: number,
@@ -1145,6 +1161,7 @@ export type RoomLocalStatus = {
 	preparedRevision: number | null,
 	profile: RoomProfileBinding | null,
 	cachedContentHashes: string[],
+	activity: RoomActivity,
 };
 
 /**  Immutable description of the exact files in one room revision. */

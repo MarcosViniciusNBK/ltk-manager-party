@@ -8,8 +8,8 @@
 use fs_err as fs;
 use ltk_manager_core::config::Config;
 use ltk_manager_core::events::{
-    BackendEvent, EventSink, RoomPresenceChanged, RoomPresenceState, RoomPublishProgress,
-    RoomPublishStage,
+    BackendEvent, EventSink, RoomActivity, RoomActivityStage, RoomPresenceChanged,
+    RoomPresenceState, RoomPublishProgress, RoomPublishStage,
 };
 use ltk_manager_core::mods::ModLibrary;
 use ltk_manager_core::room_sync::{
@@ -25,8 +25,9 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -37,7 +38,7 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_REQUEST_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 const REALTIME_READ_TIMEOUT: Duration = Duration::from_millis(250);
-const LOCAL_CHANGE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
+const FALLBACK_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 type PresenceEventTimes = HashMap<(String, String), (RoomPresenceState, Instant)>;
 
@@ -50,6 +51,7 @@ pub struct RoomSyncState {
     sessions: Arc<Mutex<HashMap<String, RoomSyncSession>>>,
     profile_signatures: Arc<Mutex<HashMap<String, u64>>>,
     operation_lock: Arc<Mutex<()>>,
+    library_change_generation: Arc<AtomicU64>,
     events: RoomEventReporter,
 }
 
@@ -70,8 +72,16 @@ impl RoomSyncState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             profile_signatures: Arc::new(Mutex::new(HashMap::new())),
             operation_lock: Arc::new(Mutex::new(())),
+            library_change_generation: Arc::new(AtomicU64::new(0)),
             events: RoomEventReporter::new(events),
         })
+    }
+
+    /// Wake signal used by the core event adapter after any library mutation. The real-time room
+    /// worker observes this within one WebSocket read timeout (currently 250 ms).
+    pub fn notify_library_changed(&self) {
+        self.library_change_generation
+            .fetch_add(1, Ordering::Release);
     }
 
     /// Serialize network/profile mutations with the background reconciler. The guard is acquired
@@ -250,6 +260,7 @@ impl RoomSyncState {
                 .map(|prepared| prepared.revision),
             profile: self.store.room_profile(room_id)?,
             cached_content_hashes,
+            activity: self.events.activity(room_id),
         })
     }
 
@@ -1018,9 +1029,24 @@ impl RoomSyncState {
         library: &ltk_manager_core::mods::ModLibrary,
         config: &ltk_manager_core::config::Config,
     ) -> Result<RoomProfileWorkflowResult, RoomRuntimeError> {
-        self.sync_remote_room(room_id)?;
-        self.prepare_revision(library, config, room_id)?;
-        self.create_profile(library, config, room_id)
+        self.events
+            .emit_activity(room_id, RoomActivityStage::Downloading);
+        let result = (|| {
+            self.sync_remote_room(room_id)?;
+            self.events
+                .emit_activity(room_id, RoomActivityStage::UpdatingProfile);
+            self.prepare_revision(library, config, room_id)?;
+            self.create_profile(library, config, room_id)
+        })();
+        self.events.emit_activity(
+            room_id,
+            if result.is_ok() {
+                RoomActivityStage::Complete
+            } else {
+                RoomActivityStage::Failed
+            },
+        );
+        result
     }
 
     /// Keep every joined room converged in the background. A local edit to the dedicated room
@@ -1093,6 +1119,8 @@ impl RoomSyncState {
 
         let mut last_fallback = Instant::now();
         let mut last_ping = Instant::now();
+        let mut observed_library_generation =
+            self.library_change_generation.load(Ordering::Acquire);
         loop {
             match socket.read() {
                 Ok(tungstenite::Message::Text(text)) => {
@@ -1133,7 +1161,12 @@ impl RoomSyncState {
                     .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
                 last_ping = Instant::now();
             }
-            if last_fallback.elapsed() >= LOCAL_CHANGE_SCAN_INTERVAL {
+            let library_generation = self.library_change_generation.load(Ordering::Acquire);
+            if library_generation != observed_library_generation {
+                self.reconcile_all_rooms(library, config)?;
+                observed_library_generation = library_generation;
+                last_fallback = Instant::now();
+            } else if last_fallback.elapsed() >= FALLBACK_RECONCILE_INTERVAL {
                 self.reconcile_all_rooms(library, config)?;
                 last_fallback = Instant::now();
             }
@@ -1145,7 +1178,6 @@ impl RoomSyncState {
         library: &ModLibrary,
         config: &Config,
     ) -> Result<(), RoomRuntimeError> {
-        let _operation = self.lock_operation();
         for room in self.store.rooms()? {
             if let Err(error) = self.reconcile_room(&room.room_id, library, config) {
                 tracing::warn!(room_id = %room.room_id, %error, "Could not reconcile room");
@@ -1155,6 +1187,107 @@ impl RoomSyncState {
     }
 
     fn reconcile_room(
+        &self,
+        room_id: &str,
+        library: &ModLibrary,
+        config: &Config,
+    ) -> Result<(), RoomRuntimeError> {
+        self.events
+            .emit_activity(room_id, RoomActivityStage::Checking);
+        let requires_operation = match self.room_requires_operation(room_id, library, config) {
+            Ok(requires_operation) => requires_operation,
+            Err(error) => {
+                self.events.finish_check(room_id, RoomActivityStage::Failed);
+                return Err(error);
+            }
+        };
+        if !requires_operation {
+            self.events
+                .finish_check(room_id, RoomActivityStage::Complete);
+            return Ok(());
+        }
+
+        // Periodic/read-only checks never own the operation lock. Once actual work is discovered,
+        // the background worker yields to an already running user operation instead of causing a
+        // misleading OperationInProgress response.
+        let Some(_operation) = self.try_lock_operation() else {
+            self.events.finish_check(room_id, RoomActivityStage::Idle);
+            return Ok(());
+        };
+        let result = self.reconcile_room_locked(room_id, library, config);
+        // From this point the operation lock gives this reconciliation exclusive ownership of
+        // the visible activity. Publish its final outcome even when an intermediate upload or
+        // download stage replaced `Checking`.
+        self.events.emit_activity(
+            room_id,
+            if result.is_ok() {
+                RoomActivityStage::Complete
+            } else {
+                RoomActivityStage::Failed
+            },
+        );
+        result
+    }
+
+    fn room_requires_operation(
+        &self,
+        room_id: &str,
+        library: &ModLibrary,
+        config: &Config,
+    ) -> Result<bool, RoomRuntimeError> {
+        if let Some(binding) = self.store.room_profile(room_id)? {
+            let profile = library
+                .get_profiles(config)
+                .map_err(|error| RoomRuntimeError::Network(error.to_string()))?
+                .into_iter()
+                .find(|profile| profile.id == binding.local_profile_id);
+            if let Some(profile) = profile {
+                let signature = profile_signature(&profile);
+                let previous = self.profile_signatures.lock().get(room_id).copied();
+                if previous != Some(signature) {
+                    let (_, artifacts) = library
+                        .collect_profile_room_artifacts(config, Some(&profile.id))
+                        .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+                    let candidate: Vec<_> =
+                        artifacts.iter().map(|(_, item)| item.clone()).collect();
+                    let changed = self
+                        .store
+                        .accepted_manifest(room_id)?
+                        .as_ref()
+                        .is_none_or(|manifest| manifest.mods != candidate);
+                    if changed {
+                        return Ok(true);
+                    }
+                    self.profile_signatures
+                        .lock()
+                        .insert(room_id.to_string(), signature);
+                }
+            }
+        }
+
+        let remote_revision = self.remote_revision(room_id)?;
+        let local_revision = self
+            .store
+            .accepted_manifest(room_id)?
+            .map_or(0, |manifest| manifest.revision);
+        if remote_revision > local_revision {
+            return Ok(true);
+        }
+        if local_revision == 0 {
+            return Ok(false);
+        }
+        let prepared_revision = self
+            .store
+            .prepared_revision(room_id)?
+            .map(|prepared| prepared.revision);
+        let profile_revision = self
+            .store
+            .room_profile(room_id)?
+            .map(|profile| profile.revision);
+        Ok(prepared_revision != Some(local_revision) || profile_revision != Some(local_revision))
+    }
+
+    fn reconcile_room_locked(
         &self,
         room_id: &str,
         library: &ModLibrary,
@@ -1294,7 +1427,7 @@ impl RoomSyncState {
 
 pub fn room_server_url() -> String {
     std::env::var("LTK_ROOM_SERVER_URL")
-        .unwrap_or_else(|_| "http://177.153.59.168:3000".to_string())
+        .unwrap_or_else(|_| "https://mag.horuzprod.com/ltk-rooms".to_string())
 }
 
 fn set_websocket_timeouts(
@@ -1396,6 +1529,7 @@ pub struct RoomLocalStatus {
     pub prepared_revision: Option<u64>,
     pub profile: Option<RoomProfileBinding>,
     pub cached_content_hashes: Vec<String>,
+    pub activity: RoomActivity,
 }
 
 /// Errors retained inside the room IPC boundary. Their raw sources can contain local paths, so the
@@ -1454,6 +1588,7 @@ struct RoomEventReporter {
     events: Arc<dyn EventSink>,
     transfers: Arc<Mutex<HashMap<String, Instant>>>,
     presence: Arc<Mutex<PresenceEventTimes>>,
+    activities: Arc<Mutex<HashMap<String, RoomActivity>>>,
 }
 
 impl RoomEventReporter {
@@ -1462,6 +1597,7 @@ impl RoomEventReporter {
             events,
             transfers: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(HashMap::new())),
+            activities: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1490,8 +1626,66 @@ impl RoomEventReporter {
     }
 
     fn emit_publish(&self, progress: RoomPublishProgress) {
+        let activity = match progress.stage {
+            RoomPublishStage::Preparing => RoomActivityStage::Preparing,
+            RoomPublishStage::Uploading => RoomActivityStage::Uploading,
+            RoomPublishStage::Publishing | RoomPublishStage::Finalizing => {
+                RoomActivityStage::Publishing
+            }
+            RoomPublishStage::Complete => RoomActivityStage::Complete,
+            RoomPublishStage::Failed => RoomActivityStage::Failed,
+        };
+        self.emit_activity(&progress.room_id, activity);
         self.events
             .emit(BackendEvent::RoomPublishProgress(progress));
+    }
+
+    fn activity(&self, room_id: &str) -> RoomActivity {
+        self.activities
+            .lock()
+            .get(room_id)
+            .cloned()
+            .unwrap_or_else(|| RoomActivity {
+                room_id: room_id.to_string(),
+                stage: RoomActivityStage::Idle,
+                updated_at_ms: unix_time_ms(),
+            })
+    }
+
+    fn emit_activity(&self, room_id: &str, stage: RoomActivityStage) {
+        let activity = RoomActivity {
+            room_id: room_id.to_string(),
+            stage,
+            updated_at_ms: unix_time_ms(),
+        };
+        self.activities
+            .lock()
+            .insert(room_id.to_string(), activity.clone());
+        self.events
+            .emit(BackendEvent::RoomActivityChanged(activity));
+    }
+
+    /// Complete a read-only check only if no real operation has replaced its visible state.
+    fn finish_check(&self, room_id: &str, stage: RoomActivityStage) {
+        let activity = {
+            let mut activities = self.activities.lock();
+            if !activities
+                .get(room_id)
+                .is_some_and(|activity| activity.stage == RoomActivityStage::Checking)
+            {
+                return;
+            }
+
+            let activity = RoomActivity {
+                room_id: room_id.to_string(),
+                stage,
+                updated_at_ms: unix_time_ms(),
+            };
+            activities.insert(room_id.to_string(), activity.clone());
+            activity
+        };
+        self.events
+            .emit(BackendEvent::RoomActivityChanged(activity));
     }
 
     fn emit_presence(&self, presence: RoomPresenceChanged) {
@@ -1507,6 +1701,15 @@ impl RoomEventReporter {
         self.events
             .emit(BackendEvent::RoomPresenceChanged(presence));
     }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ export function RoomEventListeners() {
   useTauriEvent("room-sync-progress", refreshRooms);
   useTauriEvent("room-transfer-progress", refreshRooms);
   useTauriEvent("room-publish-progress", refreshRooms);
+  useTauriEvent("room-activity-changed", refreshRooms);
   useTauriEvent("room-presence-changed", refreshRooms);
 
   return null;

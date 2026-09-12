@@ -4,6 +4,12 @@ ARG BUILDER_IMAGE=rust:1-slim-bookworm
 # Build stage
 FROM ${BUILDER_IMAGE} AS builder
 
+# The VPS can occasionally have a very low-throughput route to crates.io. Keep TLS and checksum
+# verification intact, but do not abort a valid download merely because it is slower than 10 B/s.
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_HTTP_TIMEOUT=600 \
+    CARGO_HTTP_LOW_SPEED_LIMIT=1
+
 WORKDIR /usr/src/room-server
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src

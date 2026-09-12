@@ -1,7 +1,9 @@
 //! Tauri adapter for the core [`EventSink`].
 
 use ltk_manager_core::events::{BackendEvent, EventSink};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::rooms::RoomSyncState;
 
 /// Delivers [`BackendEvent`]s to the webview.
 ///
@@ -20,6 +22,14 @@ impl TauriEventSink {
 
 impl EventSink for TauriEventSink {
     fn emit(&self, event: BackendEvent) {
+        // Library mutations are the authoritative local signal for room-profile edits. Wake the
+        // room worker immediately instead of waiting for its defensive periodic scan.
+        if matches!(&event, BackendEvent::LibraryChanged) {
+            if let Some(rooms) = self.app_handle.try_state::<RoomSyncState>() {
+                rooms.notify_library_changed();
+            }
+        }
+
         let name = event.name();
         let result = match &event {
             BackendEvent::OverlayProgress(progress) => self.app_handle.emit(name, progress),
@@ -44,6 +54,7 @@ impl EventSink for TauriEventSink {
             BackendEvent::RoomSyncProgress(progress) => self.app_handle.emit(name, progress),
             BackendEvent::RoomTransferProgress(progress) => self.app_handle.emit(name, progress),
             BackendEvent::RoomPublishProgress(progress) => self.app_handle.emit(name, progress),
+            BackendEvent::RoomActivityChanged(activity) => self.app_handle.emit(name, activity),
             BackendEvent::RoomPresenceChanged(presence) => self.app_handle.emit(name, presence),
             BackendEvent::LinkedBinsUpdated
             | BackendEvent::ChecksumMismatchesUpdated

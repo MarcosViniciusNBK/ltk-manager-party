@@ -47,11 +47,13 @@ services:
       SERVER_PORT: 3000
       DATABASE_URL: postgres://${POSTGRES_USER:-ltk}:${POSTGRES_PASSWORD:-ltk_secure_pass}@postgres:5432/${POSTGRES_DB:-ltk_rooms}
       STORAGE_DIR: /data/blobs
+      UPDATES_DIR: /data/updates
       STORAGE_SECRET: ${STORAGE_SECRET:?STORAGE_SECRET must be configured}
-      PUBLIC_SERVER_URL: http://177.153.59.168:3000
+      PUBLIC_SERVER_URL: https://mag.horuzprod.com/ltk-rooms
       RUST_LOG: ltk_room_server=debug,tower_http=info,axum=info
     volumes:
       - ./data/blobs:/data/blobs
+      - ./data/updates:/data/updates:ro
     ports:
       - "3000:3000"
     healthcheck:

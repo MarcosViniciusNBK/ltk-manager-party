@@ -66,9 +66,9 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEwQjBFRkU5MDdENUVENTIKUldSUzdkVUg2ZSt3b0pldjRGZUQ3WkgwcjU0M2d5N1pnRGlhR0NPODkyMWpyaTEvUFQvWWlpcVkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJGN0VCREM4NDhGMDQwQ0UKUldUT1FQQkl5TDErTDRSVXZMVVdtTURyUy9CTjFndjBMVkIxbnBOQkx2OVZaVXdQTllLUHptalkK",
       "endpoints": [
-        "https://github.com/LeagueToolkit/ltk-manager/releases/download/updater/latest.json"
+        "https://mag.horuzprod.com/ltk-rooms/v1/updates/{{target}}/{{arch}}/{{current_version}}"
       ],
       "windows": {
         "installMode": "passive"

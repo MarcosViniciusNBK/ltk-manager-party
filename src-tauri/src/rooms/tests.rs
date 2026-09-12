@@ -200,3 +200,48 @@ fn remote_members_accept_server_snake_case_and_emit_ipc_camel_case() {
     assert_eq!(ipc["lastAcknowledgedRevision"], 4);
     assert!(ipc.get("member_id").is_none());
 }
+
+#[test]
+fn room_activity_distinguishes_idle_checking_and_real_work() {
+    let (state, events) = setup();
+    assert_eq!(
+        state.local_status("room_a").unwrap().activity.stage,
+        RoomActivityStage::Idle
+    );
+
+    state
+        .events
+        .emit_activity("room_a", RoomActivityStage::Checking);
+    assert_eq!(
+        state.local_status("room_a").unwrap().activity.stage,
+        RoomActivityStage::Checking
+    );
+
+    state
+        .events
+        .emit_activity("room_a", RoomActivityStage::Uploading);
+    state
+        .events
+        .finish_check("room_a", RoomActivityStage::Complete);
+    assert_eq!(
+        state.local_status("room_a").unwrap().activity.stage,
+        RoomActivityStage::Uploading,
+        "a completed read-only check must not hide a real transfer"
+    );
+    assert!(events
+        .0
+        .lock()
+        .iter()
+        .any(|event| matches!(event, BackendEvent::RoomActivityChanged(_))));
+}
+
+#[test]
+fn library_change_notification_advances_the_realtime_generation() {
+    let (state, _) = setup();
+    let before = state.library_change_generation.load(Ordering::Acquire);
+    state.notify_library_changed();
+    assert_eq!(
+        state.library_change_generation.load(Ordering::Acquire),
+        before + 1
+    );
+}
