@@ -115,7 +115,10 @@ pub enum AppErrorResponse {
     },
     /// A room synchronization operation failed. Raw room errors can contain local paths, so only
     /// this stable category reaches the webview.
-    RoomSync { kind: RoomSyncErrorKind },
+    RoomSync {
+        kind: RoomSyncErrorKind,
+        reason: RoomSyncErrorReason,
+    },
 }
 
 /// Stable categories for the isolated room synchronization IPC boundary.
@@ -128,6 +131,40 @@ pub enum RoomSyncErrorKind {
     Synchronization,
     Preparation,
     Profile,
+    Interrupted,
+}
+
+/// Actionable reason for a room error. Unlike lower-level error prose, these values cannot leak
+/// local paths, credentials, or signed transfer URLs across the IPC boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, specta::Type)]
+#[ts(export)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RoomSyncErrorReason {
+    ServerUnavailable,
+    RequestTimedOut,
+    RoomNotFound,
+    RoomExpired,
+    InvalidPassword,
+    RateLimited,
+    RoomAlreadyExists,
+    InvalidRoomId,
+    PasswordTooShort,
+    AlreadyInRoom,
+    OperationInProgress,
+    SessionExpired,
+    RevisionConflict,
+    StorageQuotaExceeded,
+    SharedFileUnavailable,
+    IntegrityCheckFailed,
+    InvalidServerResponse,
+    ServerError,
+    LocalState,
+    LocalCache,
+    LocalPreparation,
+    LocalProfile,
+    CredentialStore,
+    LocalFile,
+    Synchronization,
     Interrupted,
 }
 

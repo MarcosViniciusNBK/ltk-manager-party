@@ -70,6 +70,14 @@ fn draft_membership_and_cached_manifest_stay_outside_game_actions() {
     let snapshot = state.synchronize_manifest(manifest).unwrap();
     assert_eq!(snapshot.phase, RoomSyncPhase::Synchronized);
     assert_eq!(state.cache_status().unwrap().referenced_blobs, 1);
+    assert_eq!(
+        state
+            .local_status("room_a")
+            .unwrap()
+            .cached_content_hashes
+            .len(),
+        1
+    );
     assert!(state.leave("room_a").unwrap());
 
     let recorded = events.0.lock();
@@ -102,6 +110,7 @@ fn transfer_and_duplicate_presence_events_are_throttled() {
     let progress = TransferProgress {
         room_id: "room_a".to_string(),
         content_hash: ContentHash::from_reader(Cursor::new(b"blob")).unwrap(),
+        display_name: Some("Shared mod".to_string()),
         direction: TransferDirection::Download,
         transferred_bytes: 1,
         total_bytes: 4,
@@ -113,6 +122,7 @@ fn transfer_and_duplicate_presence_events_are_throttled() {
     transfer(TransferProgress {
         room_id: "room_a".to_string(),
         content_hash: ContentHash::from_reader(Cursor::new(b"blob")).unwrap(),
+        display_name: Some("Shared mod".to_string()),
         direction: TransferDirection::Download,
         transferred_bytes: 4,
         total_bytes: 4,
@@ -144,4 +154,49 @@ fn transfer_and_duplicate_presence_events_are_throttled() {
             .count(),
         1
     );
+}
+
+#[test]
+fn staged_manifest_is_visible_while_its_mod_is_downloading() {
+    let (state, _) = setup();
+    state.create_draft("room_a").unwrap();
+    let (manifest, _) = manifest(b"not downloaded yet");
+
+    let snapshot = state.synchronize_manifest(manifest.clone()).unwrap();
+
+    assert_eq!(snapshot.phase, RoomSyncPhase::Transferring);
+    assert_eq!(state.accepted_manifest("room_a").unwrap(), Some(manifest));
+}
+
+#[test]
+fn realtime_event_parser_only_accepts_named_events() {
+    assert_eq!(
+        room_event_name(r#"{"event":"manifest_published","data":{"revision":2}}"#).as_deref(),
+        Some("manifest_published")
+    );
+    assert_eq!(room_event_name(r#"{"data":{}}"#), None);
+    assert_eq!(room_event_name("not-json"), None);
+}
+
+#[test]
+fn remote_members_accept_server_snake_case_and_emit_ipc_camel_case() {
+    let wire: RemoteMemberInfoWire = serde_json::from_value(serde_json::json!({
+        "member_id": "member_a",
+        "role": "member",
+        "last_acknowledged_revision": 4,
+        "ack_status": "synchronized",
+        "is_online": true,
+        "is_stale": false,
+        "joined_at": "ignored server field"
+    }))
+    .unwrap();
+    let member = RemoteMemberInfo::from(wire);
+
+    assert_eq!(member.member_id, "member_a");
+    assert_eq!(member.last_acknowledged_revision, 4);
+
+    let ipc = serde_json::to_value(member).unwrap();
+    assert_eq!(ipc["memberId"], "member_a");
+    assert_eq!(ipc["lastAcknowledgedRevision"], 4);
+    assert!(ipc.get("member_id").is_none());
 }

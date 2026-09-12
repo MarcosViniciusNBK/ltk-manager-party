@@ -2,7 +2,7 @@ import { SignInIcon, UsersThreeIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 
 import { Button, FormField, SectionCard, SelectField, useToast } from "@/components";
-import { errorMessage, m } from "@/i18n";
+import { errorMessage, errorTitle, m } from "@/i18n";
 import type { JoinedRoom } from "@/lib/bindings.gen";
 import { useActiveProfile, useProfiles } from "@/modules/library";
 
@@ -32,8 +32,22 @@ export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void
       toast.warning(m.rooms_code_required());
       return null;
     }
+    if (!/^[a-z0-9_-]{3,64}$/.test(roomId)) {
+      toast.warning(
+        m["error.ROOM_SYNC.INVALID_ROOM_ID.title"](),
+        m["error.ROOM_SYNC.INVALID_ROOM_ID.description"](),
+      );
+      return null;
+    }
     if (!password) {
       toast.warning(m.rooms_password_required());
+      return null;
+    }
+    if (password.length < 4) {
+      toast.warning(
+        m["error.ROOM_SYNC.PASSWORD_TOO_SHORT.title"](),
+        m["error.ROOM_SYNC.PASSWORD_TOO_SHORT.description"](),
+      );
       return null;
     }
     return { roomId, password };
@@ -51,7 +65,8 @@ export function RoomDraftForm({ onOpened }: { onOpened: (roomId: string) => void
           m.rooms_draft_ready_description(),
         );
       },
-      onError: (error: unknown) => toast.error(m.rooms_open_failed_title(), errorMessage(error)),
+      onError: (error: unknown) =>
+        toast.error(errorTitle(error, m.rooms_open_failed_title()), errorMessage(error)),
     };
 
     if (mode === "create") {

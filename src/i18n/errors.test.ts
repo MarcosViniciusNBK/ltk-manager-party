@@ -76,10 +76,16 @@ describe("describeError", () => {
     );
   });
 
-  it("keeps room synchronization errors generic", () => {
-    expect(describeError({ code: "ROOM_SYNC", kind: "SYNCHRONIZATION" })).toEqual({
-      title: m["error.ROOM_SYNC.title"](),
-      description: m["error.ROOM_SYNC.description"](),
+  it("describes the actionable room synchronization reason", () => {
+    expect(
+      describeError({
+        code: "ROOM_SYNC",
+        kind: "SYNCHRONIZATION",
+        reason: "INVALID_PASSWORD",
+      }),
+    ).toEqual({
+      title: m["error.ROOM_SYNC.INVALID_PASSWORD.title"](),
+      description: m["error.ROOM_SYNC.INVALID_PASSWORD.description"](),
     });
   });
 });

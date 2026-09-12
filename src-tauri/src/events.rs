@@ -43,6 +43,7 @@ impl EventSink for TauriEventSink {
             BackendEvent::ExtractProgress(progress) => self.app_handle.emit(name, progress),
             BackendEvent::RoomSyncProgress(progress) => self.app_handle.emit(name, progress),
             BackendEvent::RoomTransferProgress(progress) => self.app_handle.emit(name, progress),
+            BackendEvent::RoomPublishProgress(progress) => self.app_handle.emit(name, progress),
             BackendEvent::RoomPresenceChanged(presence) => self.app_handle.emit(name, presence),
             BackendEvent::LinkedBinsUpdated
             | BackendEvent::ChecksumMismatchesUpdated

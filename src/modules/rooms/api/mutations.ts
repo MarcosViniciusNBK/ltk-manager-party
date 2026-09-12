@@ -25,6 +25,7 @@ function invalidateRoom(client: QueryClient, roomId: string) {
 export const roomMutations = {
   createRemote: (client: QueryClient) =>
     mutationOptions<JoinedRoom, unknown, { roomId: string; password: string; profileId: string }>({
+      meta: { silentError: true },
       mutationFn: mutationFn<
         JoinedRoom,
         unknown,
@@ -35,6 +36,7 @@ export const roomMutations = {
 
   joinRemote: (client: QueryClient) =>
     mutationOptions<JoinedRoom, unknown, { roomId: string; password: string }>({
+      meta: { silentError: true },
       mutationFn: mutationFn<JoinedRoom, unknown, { roomId: string; password: string }>(
         ({ roomId, password }) => api.rooms.joinRemote(roomId, password),
       ),
@@ -43,6 +45,7 @@ export const roomMutations = {
 
   publishProfile: (client: QueryClient) =>
     mutationOptions<RoomSyncSnapshot, unknown, { roomId: string; profileId: string | null }>({
+      meta: { silentError: true },
       mutationFn: mutationFn<
         RoomSyncSnapshot,
         unknown,
@@ -53,6 +56,7 @@ export const roomMutations = {
 
   syncProfile: (client: QueryClient) =>
     mutationOptions<RoomProfileSummary, unknown, string>({
+      meta: { silentError: true },
       mutationFn: mutationFn<RoomProfileSummary, unknown, string>((roomId) =>
         api.rooms.syncProfile(roomId),
       ),
@@ -73,12 +77,14 @@ export const roomMutations = {
 
   leave: (client: QueryClient) =>
     mutationOptions<boolean, unknown, string>({
+      meta: { silentError: true },
       mutationFn: mutationFn<boolean, unknown, string>(api.rooms.leave),
       onSettled: (_removed, _error, roomId) => invalidateRoom(client, roomId),
     }),
 
   pruneCache: (client: QueryClient) =>
     mutationOptions<CachePruneReport, unknown, void>({
+      meta: { silentError: true },
       mutationFn: mutationFn<CachePruneReport, unknown, void>(api.rooms.pruneCache),
       onSuccess: () => client.invalidateQueries({ queryKey: roomKeys.cache() }),
     }),

@@ -5,7 +5,7 @@
 //! operations. Network clients added later submit manifests here; a renderer never supplies a URL,
 //! access token, or command that can affect a running game.
 
-use crate::error::{AppErrorResponse, IpcResult, RoomSyncErrorKind};
+use crate::error::{AppErrorResponse, IpcResult, RoomSyncErrorKind, RoomSyncErrorReason};
 use crate::mods::ModLibraryState;
 use crate::rooms::{
     RemoteMemberInfo, RoomCacheStatus, RoomLocalStatus, RoomRuntimeError, RoomSyncState,
@@ -53,15 +53,19 @@ pub async fn create_remote_room(
     let config = app_handle.state::<SettingsState>().config();
     room_task(move || {
         let _operation = rooms.lock_operation();
+        if !rooms.rooms()?.is_empty() {
+            return Err(RoomCommandError::AlreadyInRoom);
+        }
         let joined = rooms.create_remote_room(&room_id, &password)?;
         rooms.publish_profile_to_remote_room(&room_id, Some(&profile_id), &library, &config)?;
-        Ok::<_, RoomRuntimeError>(joined)
+        Ok::<_, RoomCommandError>(joined)
     })
     .await
 }
 
-/// Join an existing room and automatically download, prepare, and create/update its dedicated
-/// local profile. It remains unapplied until the user uses the existing Start/Play flow.
+/// Join an existing room. The real-time background worker then downloads, prepares, and
+/// creates/updates its dedicated local profile while the room UI can display transfer progress.
+/// It remains unapplied until the user uses the existing Start/Play flow.
 #[tauri::command]
 #[specta::specta]
 pub async fn join_remote_room(
@@ -71,17 +75,14 @@ pub async fn join_remote_room(
 ) -> IpcResult<JoinedRoom> {
     let room_id = room_id.trim().to_lowercase();
     let rooms = rooms(&app_handle);
-    let library = app_handle.state::<ModLibraryState>().0.clone();
-    let config = app_handle.state::<SettingsState>().config();
     room_task(move || {
         let _operation = rooms.lock_operation();
-        let joined = rooms.join_remote_room(&room_id, &password)?;
-        let snapshot = rooms.sync_remote_room(&room_id)?;
-        if snapshot.active_revision > 0 {
-            rooms.prepare_revision(&library, &config, &room_id)?;
-            rooms.create_profile(&library, &config, &room_id)?;
+        if !rooms.rooms()?.is_empty() {
+            return Err(RoomCommandError::AlreadyInRoom);
         }
-        Ok::<_, RoomRuntimeError>(joined)
+        rooms
+            .join_remote_room(&room_id, &password)
+            .map_err(Into::into)
     })
     .await
 }
@@ -103,7 +104,14 @@ pub async fn get_remote_room_members(
 #[specta::specta]
 pub async fn create_room_draft(room_id: String, app_handle: AppHandle) -> IpcResult<JoinedRoom> {
     let rooms = rooms(&app_handle);
-    room_task(move || rooms.create_draft(&room_id)).await
+    room_task(move || {
+        let _operation = rooms.lock_operation();
+        if !rooms.rooms()?.is_empty() {
+            return Err(RoomCommandError::AlreadyInRoom);
+        }
+        rooms.create_draft(&room_id).map_err(Into::into)
+    })
+    .await
 }
 
 /// Join local draft state for a room code. It has no network side effect and does not accept a
@@ -112,7 +120,14 @@ pub async fn create_room_draft(room_id: String, app_handle: AppHandle) -> IpcRes
 #[specta::specta]
 pub async fn join_room_draft(room_id: String, app_handle: AppHandle) -> IpcResult<JoinedRoom> {
     let rooms = rooms(&app_handle);
-    room_task(move || rooms.join_draft(&room_id)).await
+    room_task(move || {
+        let _operation = rooms.lock_operation();
+        if !rooms.rooms()?.is_empty() {
+            return Err(RoomCommandError::AlreadyInRoom);
+        }
+        rooms.join_draft(&room_id).map_err(Into::into)
+    })
+    .await
 }
 
 /// List local memberships and their last accepted revision.
@@ -130,8 +145,10 @@ pub async fn list_room_memberships(app_handle: AppHandle) -> IpcResult<Vec<Joine
 pub async fn leave_room(room_id: String, app_handle: AppHandle) -> IpcResult<bool> {
     let rooms = rooms(&app_handle);
     room_task(move || {
-        let _operation = rooms.lock_operation();
-        rooms.leave(&room_id)
+        let Some(_operation) = rooms.try_lock_operation() else {
+            return Err(RoomCommandError::OperationInProgress);
+        };
+        rooms.leave(&room_id).map_err(Into::into)
     })
     .await
 }
@@ -233,8 +250,12 @@ pub async fn publish_room_profile(
     let library = app_handle.state::<ModLibraryState>().0.clone();
     let config = app_handle.state::<SettingsState>().config();
     room_task(move || {
-        let _operation = rooms.lock_operation();
-        rooms.publish_profile_to_remote_room(&room_id, profile_id.as_deref(), &library, &config)
+        let Some(_operation) = rooms.try_lock_operation() else {
+            return Err(RoomCommandError::OperationInProgress);
+        };
+        rooms
+            .publish_profile_to_remote_room(&room_id, profile_id.as_deref(), &library, &config)
+            .map_err(Into::into)
     })
     .await
 }
@@ -251,10 +272,13 @@ pub async fn sync_room_profile(
     let library = app_handle.state::<ModLibraryState>().0.clone();
     let config = app_handle.state::<SettingsState>().config();
     room_task(move || {
-        let _operation = rooms.lock_operation();
+        let Some(_operation) = rooms.try_lock_operation() else {
+            return Err(RoomCommandError::OperationInProgress);
+        };
         rooms
             .sync_room_profile(&room_id, &library, &config)
             .map(RoomProfileSummary::from)
+            .map_err(Into::into)
     })
     .await
 }
@@ -279,32 +303,164 @@ where
 enum RoomCommandError {
     #[error(transparent)]
     Runtime(#[from] RoomRuntimeError),
+    #[error("the user is already connected to a room")]
+    AlreadyInRoom,
+    #[error("another room operation is already in progress")]
+    OperationInProgress,
     #[error("room operation was interrupted")]
     Interrupted,
 }
 
 impl From<RoomCommandError> for AppErrorResponse {
     fn from(error: RoomCommandError) -> Self {
-        let kind = match &error {
-            RoomCommandError::Runtime(RoomRuntimeError::State(_)) => RoomSyncErrorKind::State,
-            RoomCommandError::Runtime(RoomRuntimeError::Cache(_)) => RoomSyncErrorKind::Cache,
-            RoomCommandError::Runtime(RoomRuntimeError::Client(_)) => {
-                RoomSyncErrorKind::Synchronization
+        let (kind, reason) = match &error {
+            RoomCommandError::Runtime(RoomRuntimeError::State(_)) => {
+                (RoomSyncErrorKind::State, RoomSyncErrorReason::LocalState)
             }
-            RoomCommandError::Runtime(RoomRuntimeError::Preparation(_)) => {
-                RoomSyncErrorKind::Preparation
+            RoomCommandError::Runtime(RoomRuntimeError::Cache(_)) => {
+                (RoomSyncErrorKind::Cache, RoomSyncErrorReason::LocalCache)
             }
-            RoomCommandError::Runtime(RoomRuntimeError::Profile(_)) => RoomSyncErrorKind::Profile,
-            RoomCommandError::Runtime(RoomRuntimeError::Credential(_)) => RoomSyncErrorKind::State,
-            RoomCommandError::Runtime(RoomRuntimeError::Io(_)) => RoomSyncErrorKind::State,
-            RoomCommandError::Runtime(RoomRuntimeError::Network(_)) => {
-                RoomSyncErrorKind::Synchronization
+            RoomCommandError::Runtime(RoomRuntimeError::Client(_)) => (
+                RoomSyncErrorKind::Synchronization,
+                RoomSyncErrorReason::Synchronization,
+            ),
+            RoomCommandError::Runtime(RoomRuntimeError::Preparation(_)) => (
+                RoomSyncErrorKind::Preparation,
+                RoomSyncErrorReason::LocalPreparation,
+            ),
+            RoomCommandError::Runtime(RoomRuntimeError::Profile(_)) => (
+                RoomSyncErrorKind::Profile,
+                RoomSyncErrorReason::LocalProfile,
+            ),
+            RoomCommandError::Runtime(RoomRuntimeError::Credential(_)) => (
+                RoomSyncErrorKind::State,
+                RoomSyncErrorReason::CredentialStore,
+            ),
+            RoomCommandError::Runtime(RoomRuntimeError::Io(_)) => {
+                (RoomSyncErrorKind::State, RoomSyncErrorReason::LocalFile)
             }
-            RoomCommandError::Interrupted => RoomSyncErrorKind::Interrupted,
+            RoomCommandError::Runtime(RoomRuntimeError::Network(detail)) => (
+                RoomSyncErrorKind::Synchronization,
+                classify_network_error(detail),
+            ),
+            RoomCommandError::AlreadyInRoom => {
+                (RoomSyncErrorKind::State, RoomSyncErrorReason::AlreadyInRoom)
+            }
+            RoomCommandError::OperationInProgress => (
+                RoomSyncErrorKind::Synchronization,
+                RoomSyncErrorReason::OperationInProgress,
+            ),
+            RoomCommandError::Interrupted => (
+                RoomSyncErrorKind::Interrupted,
+                RoomSyncErrorReason::Interrupted,
+            ),
         };
         // Some lower-level room errors name local paths. The log is application-local; the IPC
         // payload intentionally contains only `kind` so a webview never receives them.
         tracing::warn!(error = %error, ?kind, "Room synchronization command failed");
-        AppErrorResponse::RoomSync { kind }
+        AppErrorResponse::RoomSync { kind, reason }
+    }
+}
+
+fn classify_network_error(detail: &str) -> RoomSyncErrorReason {
+    let lowercase = detail.to_ascii_lowercase();
+    if lowercase.contains("timed out") || lowercase.contains("timeout") {
+        return RoomSyncErrorReason::RequestTimedOut;
+    }
+    if lowercase.contains("error sending request")
+        || lowercase.contains("connection refused")
+        || lowercase.contains("failed to connect")
+        || lowercase.contains("dns")
+    {
+        return RoomSyncErrorReason::ServerUnavailable;
+    }
+    if lowercase.contains("missing ")
+        || lowercase.contains("error decoding response")
+        || lowercase.contains("invalid room server url")
+    {
+        return RoomSyncErrorReason::InvalidServerResponse;
+    }
+    if lowercase.contains("collecting profile mods") {
+        return RoomSyncErrorReason::LocalFile;
+    }
+
+    let server_code = detail
+        .find('{')
+        .and_then(|start| serde_json::from_str::<serde_json::Value>(&detail[start..]).ok())
+        .and_then(|payload| {
+            payload
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+
+    match server_code.as_deref() {
+        Some("ROOM_NOT_FOUND") => RoomSyncErrorReason::RoomNotFound,
+        Some("ROOM_EXPIRED") => RoomSyncErrorReason::RoomExpired,
+        Some("INVALID_PASSWORD") => RoomSyncErrorReason::InvalidPassword,
+        Some("RATE_LIMITED") => RoomSyncErrorReason::RateLimited,
+        Some("ROOM_EXISTS") => RoomSyncErrorReason::RoomAlreadyExists,
+        Some("INVALID_ROOM_ID") => RoomSyncErrorReason::InvalidRoomId,
+        Some("PASSWORD_TOO_SHORT") => RoomSyncErrorReason::PasswordTooShort,
+        Some("UNAUTHORIZED" | "MISSING_TOKEN" | "INVALID_AUTH_SCHEME" | "INVALID_HEADER") => {
+            RoomSyncErrorReason::SessionExpired
+        }
+        Some("REVISION_CONFLICT") => RoomSyncErrorReason::RevisionConflict,
+        Some("QUOTA_EXCEEDED") => RoomSyncErrorReason::StorageQuotaExceeded,
+        Some(
+            "BLOB_NOT_FOUND" | "BLOB_NOT_IN_ROOM" | "NO_MANIFEST" | "MANIFEST_REVISION_NOT_FOUND",
+        ) => RoomSyncErrorReason::SharedFileUnavailable,
+        Some(
+            "INTEGRITY_MISMATCH"
+            | "BLOB_METADATA_MISMATCH"
+            | "INVALID_CONTENT_HASH"
+            | "INVALID_FORMAT"
+            | "INVALID_SIZE"
+            | "INVALID_MANIFEST",
+        ) => RoomSyncErrorReason::IntegrityCheckFailed,
+        Some(
+            "DATABASE_ERROR"
+            | "HASHING_ERROR"
+            | "IO_ERROR"
+            | "STORAGE_IO_ERROR"
+            | "SERIALIZATION_ERROR",
+        ) => RoomSyncErrorReason::ServerError,
+        Some(_) => RoomSyncErrorReason::ServerError,
+        None => RoomSyncErrorReason::Synchronization,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_server_error_codes() {
+        assert_eq!(
+            classify_network_error(
+                r#"Server error (401 Unauthorized): {"code":"INVALID_PASSWORD"}"#,
+            ),
+            RoomSyncErrorReason::InvalidPassword
+        );
+        assert_eq!(
+            classify_network_error(r#"Server error (404): {"code":"ROOM_NOT_FOUND"}"#),
+            RoomSyncErrorReason::RoomNotFound
+        );
+    }
+
+    #[test]
+    fn classifies_transport_and_protocol_errors() {
+        assert_eq!(
+            classify_network_error("request timed out"),
+            RoomSyncErrorReason::RequestTimedOut
+        );
+        assert_eq!(
+            classify_network_error("error sending request for url"),
+            RoomSyncErrorReason::ServerUnavailable
+        );
+        assert_eq!(
+            classify_network_error("Missing member_token"),
+            RoomSyncErrorReason::InvalidServerResponse
+        );
     }
 }

@@ -2,4 +2,4 @@
 import type { ContentHash } from "./ContentHash";
 import type { TransferDirection } from "./TransferDirection";
 
-export type TransferProgress = { roomId: string, contentHash: ContentHash, direction: TransferDirection, transferredBytes: bigint, totalBytes: bigint, attempt: number, };
+export type TransferProgress = { roomId: string, contentHash: ContentHash, displayName: string | null, direction: TransferDirection, transferredBytes: bigint, totalBytes: bigint, attempt: number, };

@@ -1,7 +1,7 @@
 import { BroomIcon } from "@phosphor-icons/react";
 
 import { Button, SectionCard, useToast } from "@/components";
-import { errorMessage, m } from "@/i18n";
+import { errorMessage, errorTitle, m } from "@/i18n";
 
 import { usePruneRoomCache, useRoomCacheStatus } from "../api";
 
@@ -14,7 +14,8 @@ export function RoomCacheCard() {
     pruneCache.mutate(undefined, {
       onSuccess: () =>
         toast.success(m.rooms_cache_pruned_title(), m.rooms_cache_pruned_description()),
-      onError: (error) => toast.error(m.rooms_cache_prune_failed_title(), errorMessage(error)),
+      onError: (error) =>
+        toast.error(errorTitle(error, m.rooms_cache_prune_failed_title()), errorMessage(error)),
     });
   }
 

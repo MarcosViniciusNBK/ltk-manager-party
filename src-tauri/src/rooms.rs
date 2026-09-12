@@ -7,19 +7,23 @@
 
 use fs_err as fs;
 use ltk_manager_core::config::Config;
-use ltk_manager_core::events::{BackendEvent, EventSink, RoomPresenceChanged, RoomPresenceState};
+use ltk_manager_core::events::{
+    BackendEvent, EventSink, RoomPresenceChanged, RoomPresenceState, RoomPublishProgress,
+    RoomPublishStage,
+};
 use ltk_manager_core::mods::ModLibrary;
 use ltk_manager_core::room_sync::{
-    create_or_update_room_profile, prepare_accepted_revision, CachePruneReport, ManifestLimits,
-    RoomCache, RoomCacheError, RoomClientError, RoomManifest, RoomPreparationError,
+    create_or_update_room_profile, prepare_accepted_revision, CachePruneReport, ContentHash,
+    ManifestLimits, RoomCache, RoomCacheError, RoomClientError, RoomManifest, RoomPreparationError,
     RoomPreparationResult, RoomProfileBinding, RoomProfileWorkflowError, RoomProfileWorkflowResult,
     RoomStateError, RoomStateStore, RoomSyncPhase, RoomSyncSession, RoomSyncSnapshot,
-    TransferProgress, TransferProgressCallback,
+    TransferDirection, TransferProgress, TransferProgressCallback,
 };
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,6 +36,8 @@ const ROOM_CACHE_DIRECTORY: &str = "cache";
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_REQUEST_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
+const REALTIME_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const LOCAL_CHANGE_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
 type PresenceEventTimes = HashMap<(String, String), (RoomPresenceState, Instant)>;
 
@@ -72,6 +78,10 @@ impl RoomSyncState {
     /// inside blocking workers, so it never stalls Tauri's async executor or the renderer thread.
     pub fn lock_operation(&self) -> parking_lot::MutexGuard<'_, ()> {
         self.operation_lock.lock()
+    }
+
+    pub fn try_lock_operation(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+        self.operation_lock.try_lock()
     }
 
     /// Create a local draft membership. It does not create a server-side room or send a request.
@@ -202,7 +212,12 @@ impl RoomSyncState {
         &self,
         room_id: &str,
     ) -> Result<Option<RoomManifest>, RoomRuntimeError> {
-        Ok(self.store.accepted_manifest(room_id)?)
+        // Expose the staged target while it is downloading so the renderer can show one
+        // progress row per mod. Once verified, the accepted manifest remains the source of truth.
+        Ok(self
+            .store
+            .staged_manifest(room_id)?
+            .or(self.store.accepted_manifest(room_id)?))
     }
 
     /// Read the durable local preparation and profile facts for one room.
@@ -211,12 +226,30 @@ impl RoomSyncState {
     /// or otherwise change a game session. The renderer uses it to distinguish what has been
     /// synchronized from what the user has explicitly prepared locally.
     pub fn local_status(&self, room_id: &str) -> Result<RoomLocalStatus, RoomRuntimeError> {
+        let manifest = self
+            .store
+            .staged_manifest(room_id)?
+            .or(self.store.accepted_manifest(room_id)?);
+        let mut cached_content_hashes = Vec::new();
+        if let Some(manifest) = manifest {
+            for room_mod in manifest.mods {
+                let artifact = ltk_manager_core::room_sync::CanonicalRoomArtifact {
+                    content_hash: room_mod.content_hash.clone(),
+                    size_bytes: room_mod.size_bytes,
+                    format: room_mod.format,
+                };
+                if self.cache.contains(&artifact)? {
+                    cached_content_hashes.push(room_mod.content_hash.as_str().to_string());
+                }
+            }
+        }
         Ok(RoomLocalStatus {
             prepared_revision: self
                 .store
                 .prepared_revision(room_id)?
                 .map(|prepared| prepared.revision),
             profile: self.store.room_profile(room_id)?,
+            cached_content_hashes,
         })
     }
 
@@ -465,11 +498,11 @@ impl RoomSyncState {
             )));
         }
 
-        let members: Vec<RemoteMemberInfo> = res
+        let members: Vec<RemoteMemberInfoWire> = res
             .json()
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
-        Ok(members)
+        Ok(members.into_iter().map(RemoteMemberInfo::from).collect())
     }
 
     /// Synchronize manifest and missing blobs from the authoritative server.
@@ -522,6 +555,15 @@ impl RoomSyncState {
             };
 
             if self.cache.contains(&artifact)? {
+                self.events.emit_transfer(TransferProgress {
+                    room_id: room_id.to_string(),
+                    content_hash: room_mod.content_hash.clone(),
+                    display_name: Some(room_mod.display_name.clone()),
+                    direction: TransferDirection::Download,
+                    transferred_bytes: room_mod.size_bytes,
+                    total_bytes: room_mod.size_bytes,
+                    attempt: 1,
+                });
                 continue;
             }
 
@@ -559,6 +601,15 @@ impl RoomSyncState {
             }
             if offset == room_mod.size_bytes {
                 self.cache.commit_partial(&artifact)?;
+                self.events.emit_transfer(TransferProgress {
+                    room_id: room_id.to_string(),
+                    content_hash: room_mod.content_hash.clone(),
+                    display_name: Some(room_mod.display_name.clone()),
+                    direction: TransferDirection::Download,
+                    transferred_bytes: room_mod.size_bytes,
+                    total_bytes: room_mod.size_bytes,
+                    attempt: 1,
+                });
                 continue;
             }
 
@@ -588,7 +639,35 @@ impl RoomSyncState {
                 .write(true)
                 .open(&partial_path)?;
             file.seek(SeekFrom::Start(offset))?;
-            std::io::copy(&mut blob_resp, &mut file)?;
+            let mut transferred = offset;
+            self.events.emit_transfer(TransferProgress {
+                room_id: room_id.to_string(),
+                content_hash: room_mod.content_hash.clone(),
+                display_name: Some(room_mod.display_name.clone()),
+                direction: TransferDirection::Download,
+                transferred_bytes: transferred,
+                total_bytes: room_mod.size_bytes,
+                attempt: 1,
+            });
+            let mut buffer = [0_u8; 256 * 1024];
+            loop {
+                let read = blob_resp.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..read])?;
+                transferred = transferred.saturating_add(read as u64);
+                self.events.emit_transfer(TransferProgress {
+                    room_id: room_id.to_string(),
+                    content_hash: room_mod.content_hash.clone(),
+                    display_name: Some(room_mod.display_name.clone()),
+                    direction: TransferDirection::Download,
+                    transferred_bytes: transferred.min(room_mod.size_bytes),
+                    total_bytes: room_mod.size_bytes,
+                    attempt: 1,
+                });
+            }
+            file.sync_data()?;
             drop(file);
 
             self.cache.commit_partial(&artifact)?;
@@ -614,6 +693,34 @@ impl RoomSyncState {
     }
 
     pub fn publish_profile_to_remote_room(
+        &self,
+        room_id: &str,
+        profile_id: Option<&str>,
+        library: &ltk_manager_core::mods::ModLibrary,
+        config: &ltk_manager_core::config::Config,
+    ) -> Result<RoomSyncSnapshot, RoomRuntimeError> {
+        self.events.emit_publish(RoomPublishProgress {
+            room_id: room_id.to_string(),
+            stage: RoomPublishStage::Preparing,
+            completed_mods: 0,
+            total_mods: 0,
+        });
+        let result =
+            self.publish_profile_to_remote_room_inner(room_id, profile_id, library, config);
+        self.events.emit_publish(RoomPublishProgress {
+            room_id: room_id.to_string(),
+            stage: if result.is_ok() {
+                RoomPublishStage::Complete
+            } else {
+                RoomPublishStage::Failed
+            },
+            completed_mods: 0,
+            total_mods: 0,
+        });
+        result
+    }
+
+    fn publish_profile_to_remote_room_inner(
         &self,
         room_id: &str,
         profile_id: Option<&str>,
@@ -646,12 +753,21 @@ impl RoomSyncState {
             .send()
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
-        let current_revision: i64 = if info_res.status().is_success() {
-            let body: serde_json::Value = info_res.json().unwrap_or_default();
-            body["revision"].as_i64().unwrap_or(0)
-        } else {
-            0
-        };
+        if !info_res.status().is_success() {
+            let status = info_res.status();
+            let body = info_res.text().unwrap_or_default();
+            return Err(RoomRuntimeError::Network(format!(
+                "Failed to inspect room before publishing ({status}): {body}"
+            )));
+        }
+        let info_body: serde_json::Value = info_res.json().map_err(|error| {
+            RoomRuntimeError::Network(format!("Server returned invalid room information: {error}"))
+        })?;
+        let current_revision = info_body["revision"].as_i64().ok_or_else(|| {
+            RoomRuntimeError::Network(
+                "Server room information did not contain a revision".to_string(),
+            )
+        })?;
 
         let next_revision = (current_revision + 1) as u64;
         let room_mods: Vec<ltk_manager_core::room_sync::RoomMod> =
@@ -679,22 +795,36 @@ impl RoomSyncState {
             .send()
             .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
-        let missing_hashes: Vec<String> = if check_res.status().is_success() {
-            let body: serde_json::Value = check_res.json().unwrap_or_default();
-            body["missing_hashes"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            hashes.clone()
-        };
+        if !check_res.status().is_success() {
+            let status = check_res.status();
+            let body = check_res.text().unwrap_or_default();
+            return Err(RoomRuntimeError::Network(format!(
+                "Failed to check room files ({status}): {body}"
+            )));
+        }
+        let check_body: serde_json::Value = check_res.json().map_err(|error| {
+            RoomRuntimeError::Network(format!("Server returned an invalid file check: {error}"))
+        })?;
+        let missing_hashes: Vec<String> = check_body["missing_hashes"]
+            .as_array()
+            .ok_or_else(|| {
+                RoomRuntimeError::Network(
+                    "Server file check did not contain missing_hashes".to_string(),
+                )
+            })?
+            .iter()
+            .filter_map(|value| value.as_str().map(String::from))
+            .collect();
+
+        self.events.emit_publish(RoomPublishProgress {
+            room_id: room_id.to_string(),
+            stage: RoomPublishStage::Uploading,
+            completed_mods: 0,
+            total_mods: missing_hashes.len(),
+        });
 
         // 3. Upload missing blobs
-        for hash in &missing_hashes {
+        for (upload_index, hash) in missing_hashes.iter().enumerate() {
             let Some((path, mod_info)) = artifacts
                 .iter()
                 .find(|(_, m)| m.content_hash.as_str() == hash)
@@ -750,12 +880,45 @@ impl RoomSyncState {
                 )));
             }
             if offset == mod_info.size_bytes {
+                self.events.emit_transfer(TransferProgress {
+                    room_id: room_id.to_string(),
+                    content_hash: mod_info.content_hash.clone(),
+                    display_name: Some(mod_info.display_name.clone()),
+                    direction: TransferDirection::Upload,
+                    transferred_bytes: mod_info.size_bytes,
+                    total_bytes: mod_info.size_bytes,
+                    attempt: 1,
+                });
+                self.events.emit_publish(RoomPublishProgress {
+                    room_id: room_id.to_string(),
+                    stage: RoomPublishStage::Uploading,
+                    completed_mods: upload_index + 1,
+                    total_mods: missing_hashes.len(),
+                });
                 continue;
             }
 
             let mut file = fs::File::open(path)?;
             file.seek(SeekFrom::Start(offset))?;
             let remaining = mod_info.size_bytes - offset;
+            self.events.emit_transfer(TransferProgress {
+                room_id: room_id.to_string(),
+                content_hash: mod_info.content_hash.clone(),
+                display_name: Some(mod_info.display_name.clone()),
+                direction: TransferDirection::Upload,
+                transferred_bytes: offset,
+                total_bytes: mod_info.size_bytes,
+                attempt: 1,
+            });
+            let reader = UploadProgressReader {
+                file,
+                room_id: room_id.to_string(),
+                content_hash: mod_info.content_hash.clone(),
+                display_name: mod_info.display_name.clone(),
+                transferred: offset,
+                total: mod_info.size_bytes,
+                events: self.events.clone(),
+            };
             let put_res = transfer_client
                 .put(upload_url)
                 .header("X-Content-SHA256", hash)
@@ -769,7 +932,7 @@ impl RoomSyncState {
                         size = mod_info.size_bytes
                     ),
                 )
-                .body(reqwest::blocking::Body::new(file))
+                .body(reqwest::blocking::Body::sized(reader, remaining))
                 .send()
                 .map_err(|e| RoomRuntimeError::Network(e.to_string()))?;
 
@@ -779,9 +942,30 @@ impl RoomSyncState {
                     "Failed to upload blob {hash}: {err_text}"
                 )));
             }
+            let receipt = put_res
+                .headers()
+                .get("X-Content-SHA256")
+                .and_then(|value| value.to_str().ok());
+            if receipt != Some(hash.as_str()) {
+                return Err(RoomRuntimeError::Network(format!(
+                    "Upload integrity receipt did not match blob {hash}"
+                )));
+            }
+            self.events.emit_publish(RoomPublishProgress {
+                room_id: room_id.to_string(),
+                stage: RoomPublishStage::Uploading,
+                completed_mods: upload_index + 1,
+                total_mods: missing_hashes.len(),
+            });
         }
 
         // 4. Publish the manifest revision
+        self.events.emit_publish(RoomPublishProgress {
+            room_id: room_id.to_string(),
+            stage: RoomPublishStage::Publishing,
+            completed_mods: missing_hashes.len(),
+            total_mods: missing_hashes.len(),
+        });
         let publish_url = format!("{base_url}/v1/rooms/{room_id}/manifest");
         let pub_res = client
             .post(&publish_url)
@@ -801,6 +985,12 @@ impl RoomSyncState {
         }
 
         // 5. Commit local files into host's cache so host is immediately synchronized
+        self.events.emit_publish(RoomPublishProgress {
+            room_id: room_id.to_string(),
+            stage: RoomPublishStage::Finalizing,
+            completed_mods: missing_hashes.len(),
+            total_mods: missing_hashes.len(),
+        });
         for (path, mod_info) in &artifacts {
             let canonical = ltk_manager_core::room_sync::CanonicalRoomArtifact {
                 content_hash: mod_info.content_hash.clone(),
@@ -840,13 +1030,114 @@ impl RoomSyncState {
         let rooms = self.clone();
         std::thread::Builder::new()
             .name("room-profile-sync".to_string())
-            .spawn(move || loop {
-                if let Err(error) = rooms.reconcile_all_rooms(&library, &config) {
-                    tracing::warn!(%error, "Room background synchronization pass failed");
-                }
-                std::thread::sleep(Duration::from_secs(4));
-            })
+            .spawn(move || rooms.run_realtime_sync(library, config))
             .expect("room synchronization worker must start");
+    }
+
+    fn run_realtime_sync(&self, library: ModLibrary, config: Config) {
+        loop {
+            if let Err(error) = self.reconcile_all_rooms(&library, &config) {
+                tracing::warn!(%error, "Room background synchronization pass failed");
+            }
+
+            let room_id = match self.store.rooms() {
+                Ok(rooms) => rooms.first().map(|room| room.room_id.clone()),
+                Err(error) => {
+                    tracing::warn!(%error, "Could not inspect room membership for real-time sync");
+                    None
+                }
+            };
+            let Some(room_id) = room_id else {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            };
+
+            if let Err(error) = self.listen_for_room_events(&room_id, &library, &config) {
+                tracing::warn!(room_id = %room_id, %error, "Room real-time connection ended");
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    fn listen_for_room_events(
+        &self,
+        room_id: &str,
+        library: &ModLibrary,
+        config: &Config,
+    ) -> Result<(), RoomRuntimeError> {
+        use tungstenite::client::IntoClientRequest;
+
+        let token = self.get_room_token(room_id)?;
+        let base_url = room_server_url();
+        let ws_base = base_url
+            .strip_prefix("https://")
+            .map(|value| format!("wss://{value}"))
+            .or_else(|| {
+                base_url
+                    .strip_prefix("http://")
+                    .map(|value| format!("ws://{value}"))
+            })
+            .ok_or_else(|| RoomRuntimeError::Network("Invalid room server URL".to_string()))?;
+        let endpoint = format!("{}/v1/rooms/{room_id}/ws", ws_base.trim_end_matches('/'));
+        let mut request = endpoint
+            .into_client_request()
+            .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+        let authorization = tungstenite::http::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| RoomRuntimeError::Network("Invalid room credentials".to_string()))?;
+        request.headers_mut().insert("Authorization", authorization);
+
+        let (mut socket, _) = tungstenite::connect(request)
+            .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+        set_websocket_timeouts(socket.get_ref(), REALTIME_READ_TIMEOUT)?;
+        tracing::info!(room_id = %room_id, "Room real-time connection established");
+
+        let mut last_fallback = Instant::now();
+        let mut last_ping = Instant::now();
+        loop {
+            match socket.read() {
+                Ok(tungstenite::Message::Text(text)) => {
+                    let event = room_event_name(&text);
+                    if event.as_deref() == Some("manifest_published") {
+                        self.reconcile_all_rooms(library, config)?;
+                        last_fallback = Instant::now();
+                    }
+                    // Any room event can change the member list. Emitting a local snapshot makes
+                    // the renderer invalidate its read-only room queries immediately.
+                    self.events.emit_sync(self.snapshot(room_id)?);
+                }
+                Ok(tungstenite::Message::Ping(payload)) => {
+                    socket
+                        .send(tungstenite::Message::Pong(payload))
+                        .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+                }
+                Ok(tungstenite::Message::Close(_)) => return Ok(()),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    return Ok(())
+                }
+                Err(error) => return Err(RoomRuntimeError::Network(error.to_string())),
+            }
+
+            if self.store.room(room_id)?.is_none() {
+                let _ = socket.close(None);
+                return Ok(());
+            }
+            if last_ping.elapsed() >= Duration::from_secs(20) {
+                socket
+                    .send(tungstenite::Message::Text(r#"{"action":"ping"}"#.into()))
+                    .map_err(|error| RoomRuntimeError::Network(error.to_string()))?;
+                last_ping = Instant::now();
+            }
+            if last_fallback.elapsed() >= LOCAL_CHANGE_SCAN_INTERVAL {
+                self.reconcile_all_rooms(library, config)?;
+                last_fallback = Instant::now();
+            }
+        }
     }
 
     pub fn reconcile_all_rooms(
@@ -916,6 +1207,27 @@ impl RoomSyncState {
             self.profile_signatures
                 .lock()
                 .insert(room_id.to_string(), signature);
+        } else if local_revision > 0 {
+            // Joining again can restore an already accepted/cached revision without its local
+            // preparation binding. Finish that work automatically even though the server does not
+            // have a numerically newer manifest.
+            let prepared_revision = self
+                .store
+                .prepared_revision(room_id)?
+                .map(|prepared| prepared.revision);
+            if prepared_revision != Some(local_revision) {
+                self.prepare_revision(library, config, room_id)?;
+            }
+            let profile_revision = self
+                .store
+                .room_profile(room_id)?
+                .map(|profile| profile.revision);
+            if profile_revision != Some(local_revision) {
+                let result = self.create_profile(library, config, room_id)?;
+                self.profile_signatures
+                    .lock()
+                    .insert(room_id.to_string(), profile_signature(&result.profile));
+            }
         }
         Ok(())
     }
@@ -972,7 +1284,8 @@ impl RoomSyncState {
         ))
     }
 
-    /// Callback a future HTTP/WebSocket transport supplies to the transfer engine.
+    /// Progress adapter retained for the reusable transfer engine and its event contract tests.
+    #[allow(dead_code)]
     pub fn transfer_progress_callback(&self) -> TransferProgressCallback {
         let events = self.events.clone();
         Arc::new(move |progress| events.emit_transfer(progress))
@@ -982,6 +1295,32 @@ impl RoomSyncState {
 pub fn room_server_url() -> String {
     std::env::var("LTK_ROOM_SERVER_URL")
         .unwrap_or_else(|_| "http://177.153.59.168:3000".to_string())
+}
+
+fn set_websocket_timeouts(
+    stream: &tungstenite::stream::MaybeTlsStream<TcpStream>,
+    timeout: Duration,
+) -> Result<(), RoomRuntimeError> {
+    let tcp = match stream {
+        tungstenite::stream::MaybeTlsStream::Plain(stream) => stream,
+        tungstenite::stream::MaybeTlsStream::Rustls(stream) => stream.get_ref(),
+        _ => {
+            return Err(RoomRuntimeError::Network(
+                "Unsupported room real-time transport".to_string(),
+            ));
+        }
+    };
+    tcp.set_read_timeout(Some(timeout))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(10)))?;
+    Ok(())
+}
+
+fn room_event_name(message: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()?
+        .get("event")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn profile_signature(profile: &ltk_manager_core::mods::Profile) -> u64 {
@@ -1004,7 +1343,7 @@ fn profile_signature(profile: &ltk_manager_core::mods::Profile) -> u64 {
 }
 
 /// Remote member presence information from the room server.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteMemberInfo {
     pub member_id: String,
@@ -1013,6 +1352,29 @@ pub struct RemoteMemberInfo {
     pub ack_status: String,
     pub is_online: bool,
     pub is_stale: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteMemberInfoWire {
+    member_id: String,
+    role: String,
+    last_acknowledged_revision: i64,
+    ack_status: String,
+    is_online: bool,
+    is_stale: bool,
+}
+
+impl From<RemoteMemberInfoWire> for RemoteMemberInfo {
+    fn from(member: RemoteMemberInfoWire) -> Self {
+        Self {
+            member_id: member.member_id,
+            role: member.role,
+            last_acknowledged_revision: member.last_acknowledged_revision,
+            ack_status: member.ack_status,
+            is_online: member.is_online,
+            is_stale: member.is_stale,
+        }
+    }
 }
 
 /// Cache facts suitable for IPC. File paths and room credentials never cross this boundary.
@@ -1033,6 +1395,7 @@ pub struct RoomCacheStatus {
 pub struct RoomLocalStatus {
     pub prepared_revision: Option<u64>,
     pub profile: Option<RoomProfileBinding>,
+    pub cached_content_hashes: Vec<String>,
 }
 
 /// Errors retained inside the room IPC boundary. Their raw sources can contain local paths, so the
@@ -1055,6 +1418,35 @@ pub enum RoomRuntimeError {
     Io(#[from] std::io::Error),
     #[error("Network error: {0}")]
     Network(String),
+}
+
+struct UploadProgressReader {
+    file: fs::File,
+    room_id: String,
+    content_hash: ContentHash,
+    display_name: String,
+    transferred: u64,
+    total: u64,
+    events: RoomEventReporter,
+}
+
+impl Read for UploadProgressReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.file.read(buffer)?;
+        self.transferred = self.transferred.saturating_add(read as u64);
+        if read > 0 {
+            self.events.emit_transfer(TransferProgress {
+                room_id: self.room_id.clone(),
+                content_hash: self.content_hash.clone(),
+                display_name: Some(self.display_name.clone()),
+                direction: TransferDirection::Upload,
+                transferred_bytes: self.transferred.min(self.total),
+                total_bytes: self.total,
+                attempt: 1,
+            });
+        }
+        Ok(read)
+    }
 }
 
 #[derive(Clone)]
@@ -1095,6 +1487,11 @@ impl RoomEventReporter {
         sent.insert(key, now);
         self.events
             .emit(BackendEvent::RoomTransferProgress(progress));
+    }
+
+    fn emit_publish(&self, progress: RoomPublishProgress) {
+        self.events
+            .emit(BackendEvent::RoomPublishProgress(progress));
     }
 
     fn emit_presence(&self, presence: RoomPresenceChanged) {

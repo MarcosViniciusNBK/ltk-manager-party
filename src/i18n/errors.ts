@@ -81,10 +81,7 @@ export function describeError(error: AppError): ErrorCopy {
       description: m["error.UNTRUSTED_DOMAIN.description"](),
     }))
     .with({ code: "GITHUB" }, (e) => describeGitHubError(e))
-    .with({ code: "ROOM_SYNC" }, () => ({
-      title: m["error.ROOM_SYNC.title"](),
-      description: m["error.ROOM_SYNC.description"](),
-    }))
+    .with({ code: "ROOM_SYNC" }, (error) => describeRoomError(error))
     .exhaustive();
 }
 
@@ -92,6 +89,52 @@ export function describeError(error: AppError): ErrorCopy {
 export function errorSummary(error: AppError): string {
   const copy = describeError(error);
   return copy.detail ?? copy.description ?? copy.title;
+}
+
+/** Prefer the backend error's specific title when a toast supplies only a generic fallback. */
+export function errorTitle(error: unknown, fallback: string): string {
+  return isAppError(error) ? describeError(error).title : fallback;
+}
+
+function describeRoomError({ reason }: Extract<AppError, { code: "ROOM_SYNC" }>): ErrorCopy {
+  return match(reason)
+    .with("SERVER_UNAVAILABLE", () => roomCopy("SERVER_UNAVAILABLE"))
+    .with("REQUEST_TIMED_OUT", () => roomCopy("REQUEST_TIMED_OUT"))
+    .with("ROOM_NOT_FOUND", () => roomCopy("ROOM_NOT_FOUND"))
+    .with("ROOM_EXPIRED", () => roomCopy("ROOM_EXPIRED"))
+    .with("INVALID_PASSWORD", () => roomCopy("INVALID_PASSWORD"))
+    .with("RATE_LIMITED", () => roomCopy("RATE_LIMITED"))
+    .with("ROOM_ALREADY_EXISTS", () => roomCopy("ROOM_ALREADY_EXISTS"))
+    .with("INVALID_ROOM_ID", () => roomCopy("INVALID_ROOM_ID"))
+    .with("PASSWORD_TOO_SHORT", () => roomCopy("PASSWORD_TOO_SHORT"))
+    .with("ALREADY_IN_ROOM", () => roomCopy("ALREADY_IN_ROOM"))
+    .with("OPERATION_IN_PROGRESS", () => roomCopy("OPERATION_IN_PROGRESS"))
+    .with("SESSION_EXPIRED", () => roomCopy("SESSION_EXPIRED"))
+    .with("REVISION_CONFLICT", () => roomCopy("REVISION_CONFLICT"))
+    .with("STORAGE_QUOTA_EXCEEDED", () => roomCopy("STORAGE_QUOTA_EXCEEDED"))
+    .with("SHARED_FILE_UNAVAILABLE", () => roomCopy("SHARED_FILE_UNAVAILABLE"))
+    .with("INTEGRITY_CHECK_FAILED", () => roomCopy("INTEGRITY_CHECK_FAILED"))
+    .with("INVALID_SERVER_RESPONSE", () => roomCopy("INVALID_SERVER_RESPONSE"))
+    .with("SERVER_ERROR", () => roomCopy("SERVER_ERROR"))
+    .with("LOCAL_STATE", () => roomCopy("LOCAL_STATE"))
+    .with("LOCAL_CACHE", () => roomCopy("LOCAL_CACHE"))
+    .with("LOCAL_PREPARATION", () => roomCopy("LOCAL_PREPARATION"))
+    .with("LOCAL_PROFILE", () => roomCopy("LOCAL_PROFILE"))
+    .with("CREDENTIAL_STORE", () => roomCopy("CREDENTIAL_STORE"))
+    .with("LOCAL_FILE", () => roomCopy("LOCAL_FILE"))
+    .with("SYNCHRONIZATION", () => roomCopy("SYNCHRONIZATION"))
+    .with("INTERRUPTED", () => roomCopy("INTERRUPTED"))
+    .exhaustive();
+}
+
+type RoomErrorReason = Extract<AppError, { code: "ROOM_SYNC" }>["reason"];
+
+function roomCopy(reason: RoomErrorReason): ErrorCopy {
+  const titleKey = `error.ROOM_SYNC.${reason}.title` as keyof typeof m;
+  const descriptionKey = `error.ROOM_SYNC.${reason}.description` as keyof typeof m;
+  const title = m[titleKey] as () => string;
+  const description = m[descriptionKey] as () => string;
+  return { title: title(), description: description() };
 }
 
 function withDetail(title: string, detail: string): ErrorCopy {

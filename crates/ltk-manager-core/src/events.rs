@@ -14,6 +14,33 @@ use serde::{Deserialize, Serialize};
 use crate::mods::ModStorage;
 use crate::room_sync::{RoomSyncSnapshot, TransferProgress};
 
+/// Which stage a shared room profile publication has reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub enum RoomPublishStage {
+    Preparing,
+    Uploading,
+    Publishing,
+    Finalizing,
+    Complete,
+    Failed,
+}
+
+/// Coarse publication progress. Byte-level progress for each mod remains in
+/// [`TransferProgress`], while this event covers hashing, manifest commit, and local finalization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct RoomPublishProgress {
+    pub room_id: String,
+    pub stage: RoomPublishStage,
+    pub completed_mods: usize,
+    pub total_mods: usize,
+}
+
 /// The launcher's payloads are defined alongside the code that produces them,
 /// and re-exported here so every payload in the registry below can be named
 /// from one module.
@@ -446,6 +473,8 @@ declare_events! {
     RoomSyncProgress(RoomSyncSnapshot) => "room-sync-progress",
     /// A room blob transfer advanced. Emitted at a bounded rate by the desktop room state.
     RoomTransferProgress(TransferProgress) => "room-transfer-progress",
+    /// A shared room profile publication moved to another stage.
+    RoomPublishProgress(RoomPublishProgress) => "room-publish-progress",
     /// A room member joined or left. Emitted at a bounded rate by the desktop room state.
     RoomPresenceChanged(RoomPresenceChanged) => "room-presence-changed",
 }

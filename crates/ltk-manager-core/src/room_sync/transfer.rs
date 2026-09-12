@@ -141,6 +141,8 @@ impl TransferCancellation {
 pub struct TransferProgress {
     pub room_id: String,
     pub content_hash: ContentHash,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub direction: TransferDirection,
     pub transferred_bytes: u64,
     pub total_bytes: u64,
@@ -823,6 +825,7 @@ impl Read for UploadReader {
             progress(TransferProgress {
                 room_id: self.room_id.clone(),
                 content_hash: self.content_hash.clone(),
+                display_name: None,
                 direction: TransferDirection::Upload,
                 transferred_bytes: self.transferred,
                 total_bytes: self.total,
@@ -1034,6 +1037,7 @@ fn emit_progress(
         progress(TransferProgress {
             room_id: room_id.to_string(),
             content_hash: artifact.content_hash.clone(),
+            display_name: None,
             direction,
             transferred_bytes,
             total_bytes: artifact.size_bytes,

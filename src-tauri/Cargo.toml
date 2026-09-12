@@ -76,6 +76,7 @@ walkdir = { workspace = true }
 reqwest = { workspace = true }
 quick-xml = { workspace = true }
 url = "2"
+tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 flate2 = { workspace = true }
 tar = { workspace = true }
 

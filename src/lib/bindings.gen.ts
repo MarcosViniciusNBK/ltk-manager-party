@@ -113,9 +113,16 @@ export const commands = {
 	 *  next start.
 	 */
 	switchLeagueInstall: (installRoot: string) => __TAURI_INVOKE<({ ok: true; value: null }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("switch_league_install", { installRoot }),
-	/**  Create a room from a profile and materialize its collaborative profile locally. */
+	/**
+	 *  Create a room, publish the selected source profile, and materialize its dedicated shared
+	 *  profile locally. The shared profile is not selected or applied.
+	 */
 	createRemoteRoom: (roomId: string, password: string, profileId: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("create_remote_room", { roomId, password, profileId }),
-	/**  Join an existing online room on the authoritative room server. */
+	/**
+	 *  Join an existing room. The real-time background worker then downloads, prepares, and
+	 *  creates/updates its dedicated local profile while the room UI can display transfer progress.
+	 *  It remains unapplied until the user uses the existing Start/Play flow.
+	 */
 	joinRemoteRoom: (roomId: string, password: string) => __TAURI_INVOKE<({ ok: true; value: JoinedRoom }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("join_remote_room", { roomId, password }),
 	/**  Retrieve active members and synchronization state from the server. */
 	getRemoteRoomMembers: (roomId: string) => __TAURI_INVOKE<({ ok: true; value: RemoteMemberInfo[] }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_remote_room_members", { roomId }),
@@ -162,7 +169,7 @@ export const commands = {
 	getRoomCacheStatus: () => __TAURI_INVOKE<({ ok: true; value: RoomCacheStatus }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("get_room_cache_status"),
 	/**  Explicitly prune only unreferenced room-cache blobs. It cannot delete an installed library mod. */
 	pruneRoomCache: () => __TAURI_INVOKE<({ ok: true; value: CachePruneReport }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("prune_room_cache"),
-	/**  Publish a local profile to the remote room as owner. */
+	/**  Publish a local profile to the collaborative room as an authenticated member. */
 	publishRoomProfile: (roomId: string, profileId: string | null) => __TAURI_INVOKE<({ ok: true; value: RoomSyncSnapshot }) & { error?: never } | ({ ok: false; error: AppErrorResponse }) & { value?: never }>("publish_room_profile", { roomId, profileId }),
 	/**
 	 *  Sync the room's manifest, prepare it in the library, and create or update this member's
@@ -262,7 +269,7 @@ export type AppErrorResponse =
  *  A room synchronization operation failed. Raw room errors can contain local paths, so only
  *  this stable category reaches the webview.
  */
-{ code: "ROOM_SYNC"; kind: RoomSyncErrorKind };
+{ code: "ROOM_SYNC"; kind: RoomSyncErrorKind; reason: RoomSyncErrorReason };
 
 /**
  *  Where a previewed asset's bytes come from.
@@ -1077,6 +1084,7 @@ export type RoomCacheStatus = {
 export type RoomLocalStatus = {
 	preparedRevision: number | null,
 	profile: RoomProfileBinding | null,
+	cachedContentHashes: string[],
 };
 
 /**  Immutable description of the exact files in one room revision. */
@@ -1127,6 +1135,12 @@ export type RoomSyncBlockReason = "authorization" | "protocol" | "storage" | "in
 
 /**  Stable categories for the isolated room synchronization IPC boundary. */
 export type RoomSyncErrorKind = "STATE" | "CACHE" | "SYNCHRONIZATION" | "PREPARATION" | "PROFILE" | "INTERRUPTED";
+
+/**
+ *  Actionable reason for a room error. Unlike lower-level error prose, these values cannot leak
+ *  local paths, credentials, or signed transfer URLs across the IPC boundary.
+ */
+export type RoomSyncErrorReason = "SERVER_UNAVAILABLE" | "REQUEST_TIMED_OUT" | "ROOM_NOT_FOUND" | "ROOM_EXPIRED" | "INVALID_PASSWORD" | "RATE_LIMITED" | "ROOM_ALREADY_EXISTS" | "INVALID_ROOM_ID" | "PASSWORD_TOO_SHORT" | "ALREADY_IN_ROOM" | "OPERATION_IN_PROGRESS" | "SESSION_EXPIRED" | "REVISION_CONFLICT" | "STORAGE_QUOTA_EXCEEDED" | "SHARED_FILE_UNAVAILABLE" | "INTEGRITY_CHECK_FAILED" | "INVALID_SERVER_RESPONSE" | "SERVER_ERROR" | "LOCAL_STATE" | "LOCAL_CACHE" | "LOCAL_PREPARATION" | "LOCAL_PROFILE" | "CREDENTIAL_STORE" | "LOCAL_FILE" | "SYNCHRONIZATION" | "INTERRUPTED";
 
 export type RoomSyncPhase = "disconnected" | "connecting" | "comparing" | "transferring" | "verifying" | "synchronized" | "stale" | "blocked";
 

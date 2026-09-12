@@ -10,7 +10,7 @@ import { RoomDraftForm } from "./RoomDraftForm";
 /** Rooms synchronize their dedicated profile automatically; applying it remains user-driven. */
 export function RoomWorkspace() {
   const [selectedRoomId, setSelectedRoomId] = useState("");
-  const { data: rooms = [] } = useRoomMemberships();
+  const { data: rooms = [], isPending: membershipsPending } = useRoomMemberships();
 
   useEffect(() => {
     const selectedStillExists = rooms.some((room) => room.roomId === selectedRoomId);
@@ -29,7 +29,7 @@ export function RoomWorkspace() {
         <p className="mt-1 max-w-3xl text-sm text-surface-400">{m.rooms_page_description()}</p>
       </div>
 
-      <RoomDraftForm onOpened={setSelectedRoomId} />
+      {!membershipsPending && rooms.length === 0 && <RoomDraftForm onOpened={setSelectedRoomId} />}
       <LocalRoomList selectedRoomId={selectedRoomId} onSelect={setSelectedRoomId} />
       {selectedRoomId && <RoomDetail roomId={selectedRoomId} />}
     </div>

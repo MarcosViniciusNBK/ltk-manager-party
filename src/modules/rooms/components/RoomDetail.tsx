@@ -1,4 +1,5 @@
 import {
+  ArrowClockwiseIcon,
   ArrowRightIcon,
   CheckCircleIcon,
   CloudArrowDownIcon,
@@ -19,8 +20,10 @@ import {
   SelectField,
   useToast,
 } from "@/components";
-import { errorMessage, m } from "@/i18n";
+import { errorMessage, errorTitle, m } from "@/i18n";
+import type { RoomPublishProgress, TransferProgress } from "@/lib/bindings";
 import type { RemoteMemberInfo } from "@/lib/bindings.gen";
+import { useTauriEvent } from "@/lib/useTauriEvent";
 import { useActiveProfile, useProfiles } from "@/modules/library";
 import { formatBytes } from "@/utils";
 
@@ -50,6 +53,9 @@ export function RoomDetail({ roomId }: { roomId: string }) {
   const publishProfile = usePublishRoomProfile();
   const retrySync = useSyncRoomProfile();
   const [recoveryProfileId, setRecoveryProfileId] = useState("");
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, TransferProgress>>({});
+  const [uploadProgress, setUploadProgress] = useState<Record<string, TransferProgress>>({});
+  const [publishProgress, setPublishProgress] = useState<RoomPublishProgress | null>(null);
   const membership = rooms.find((room) => room.roomId === roomId);
   const workflow = getRoomWorkflowStatus({
     phase: snapshot?.phase,
@@ -67,17 +73,48 @@ export function RoomDetail({ roomId }: { roomId: string }) {
     if (!recoveryProfileId && activeProfile) setRecoveryProfileId(activeProfile.id);
   }, [activeProfile, recoveryProfileId]);
 
+  useEffect(() => {
+    setDownloadProgress({});
+    setUploadProgress({});
+    setPublishProgress(null);
+  }, [roomId]);
+
+  useTauriEvent<TransferProgress>("room-transfer-progress", (transfer) => {
+    if (transfer.roomId !== roomId) return;
+    const update = (current: Record<string, TransferProgress>) => ({
+      ...current,
+      [transfer.contentHash]: transfer,
+    });
+    if (transfer.direction === "download") setDownloadProgress(update);
+    if (transfer.direction === "upload") setUploadProgress(update);
+  });
+
+  useTauriEvent<RoomPublishProgress>("room-publish-progress", (publication) => {
+    if (publication.roomId !== roomId) return;
+    if (publication.stage === "preparing") setUploadProgress({});
+    setPublishProgress(publication);
+  });
+
+  const publicationActive =
+    publishProfile.isPending ||
+    (publishProgress !== null &&
+      publishProgress.stage !== "complete" &&
+      publishProgress.stage !== "failed");
+  const publicationVisible = publicationActive || publishProgress?.stage === "failed";
+
   function leave() {
     leaveRoom.mutate(roomId, {
       onSuccess: () => toast.success(m.rooms_left_title(), m.rooms_left_description()),
-      onError: (error) => toast.error(m.rooms_leave_failed_title(), errorMessage(error)),
+      onError: (error) =>
+        toast.error(errorTitle(error, m.rooms_leave_failed_title()), errorMessage(error)),
     });
   }
 
   function retry() {
     retrySync.mutate(roomId, {
       onSuccess: () => toast.success(m.rooms_sync_done_title(), m.rooms_sync_done_description()),
-      onError: (error) => toast.error(m.rooms_sync_failed_title(), errorMessage(error)),
+      onError: (error) =>
+        toast.error(errorTitle(error, m.rooms_sync_failed_title()), errorMessage(error)),
     });
   }
 
@@ -88,7 +125,8 @@ export function RoomDetail({ roomId }: { roomId: string }) {
       {
         onSuccess: () =>
           toast.success(m.rooms_publish_done_title(), m.rooms_publish_done_description()),
-        onError: (error) => toast.error(m.rooms_publish_failed_title(), errorMessage(error)),
+        onError: (error) =>
+          toast.error(errorTitle(error, m.rooms_publish_failed_title()), errorMessage(error)),
       },
     );
   }
@@ -100,15 +138,26 @@ export function RoomDetail({ roomId }: { roomId: string }) {
         description={m.rooms_workspace_draft()}
         icon={<UsersThreeIcon className="h-4 w-4" />}
         action={
-          <Button
-            variant="ghost"
-            size="sm"
-            left={<SignOutIcon weight="bold" />}
-            loading={leaveRoom.isPending}
-            onClick={leave}
-          >
-            {m.rooms_leave_action()}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              left={<ArrowClockwiseIcon weight="bold" />}
+              loading={retrySync.isPending}
+              onClick={retry}
+            >
+              {m.rooms_refresh_action()}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              left={<SignOutIcon weight="bold" />}
+              loading={leaveRoom.isPending}
+              onClick={leave}
+            >
+              {m.rooms_leave_action()}
+            </Button>
+          </div>
         }
       >
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-surface-700 bg-surface-900/60 p-4">
@@ -171,6 +220,39 @@ export function RoomDetail({ roomId }: { roomId: string }) {
             )}
           </div>
         )}
+        {publicationVisible && (
+          <div className="border-primary-500/30 bg-primary-500/5 space-y-3 rounded-xl border p-4">
+            <p className="text-sm font-medium text-surface-100">
+              {publishProgress
+                ? publishProgressLabel(publishProgress)
+                : m.rooms_publish_progress_preparing()}
+            </p>
+            {Object.values(uploadProgress).map((transfer) => {
+              const uploaded = Number(transfer.transferredBytes);
+              const total = Number(transfer.totalBytes);
+              const percent = total > 0 ? Math.min(100, Math.round((uploaded / total) * 100)) : 0;
+              return (
+                <Progress.Root
+                  key={transfer.contentHash}
+                  value={percent}
+                  label={transfer.displayName ?? transfer.contentHash.slice(0, 12)}
+                  valueLabel={
+                    uploaded >= total
+                      ? m.rooms_upload_ready()
+                      : m.rooms_upload_progress_value({
+                          uploaded: formatBytes(uploaded),
+                          total: formatBytes(total),
+                        })
+                  }
+                >
+                  <Progress.Track size="sm">
+                    <Progress.Indicator />
+                  </Progress.Track>
+                </Progress.Root>
+              );
+            })}
+          </div>
+        )}
         <p className="text-xs text-surface-500">{m.rooms_apply_safety_note()}</p>
       </SectionCard>
 
@@ -204,7 +286,7 @@ export function RoomDetail({ roomId }: { roomId: string }) {
                   left={<PaperPlaneTiltIcon weight="bold" />}
                   onClick={publishInitialProfile}
                   loading={publishProfile.isPending}
-                  disabled={!recoveryProfileId}
+                  disabled={!recoveryProfileId || publicationActive}
                 >
                   {m.rooms_publish_action()}
                 </Button>
@@ -212,22 +294,55 @@ export function RoomDetail({ roomId }: { roomId: string }) {
             </div>
           ) : (
             <div className="space-y-2">
-              {manifest.mods.map((mod) => (
-                <div
-                  key={mod.contentHash}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-surface-700/60 bg-surface-800/35 p-3"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-surface-100">
-                      {mod.displayName}
-                    </p>
-                    <p className="text-xs text-surface-400">{mod.version || mod.format}</p>
+              {manifest.mods.map((mod) => {
+                const transfer = downloadProgress[mod.contentHash];
+                const transferred = Number(transfer?.transferredBytes ?? 0);
+                const total = Number(transfer?.totalBytes ?? mod.sizeBytes);
+                const modProgress =
+                  total > 0 ? Math.min(100, Math.round((transferred / total) * 100)) : 0;
+                const ready =
+                  workflow.profileReady ||
+                  localStatus?.cachedContentHashes.includes(mod.contentHash) ||
+                  (transfer && transferred >= total);
+                return (
+                  <div
+                    key={mod.contentHash}
+                    className="space-y-2 rounded-lg border border-surface-700/60 bg-surface-800/35 p-3"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-surface-100">
+                          {mod.displayName}
+                        </p>
+                        <p className="text-xs text-surface-400">{mod.version || mod.format}</p>
+                      </div>
+                      <span className="shrink-0 text-xs text-surface-400">
+                        {formatBytes(Number(mod.sizeBytes))}
+                      </span>
+                    </div>
+                    {!workflow.profileReady && (
+                      <Progress.Root
+                        value={ready ? 100 : modProgress}
+                        label={mod.displayName}
+                        valueLabel={
+                          ready
+                            ? m.rooms_mod_download_ready()
+                            : transfer
+                              ? m.rooms_mod_download_progress({
+                                  downloaded: formatBytes(transferred),
+                                  total: formatBytes(total),
+                                })
+                              : m.rooms_mod_download_waiting()
+                        }
+                      >
+                        <Progress.Track size="sm">
+                          <Progress.Indicator />
+                        </Progress.Track>
+                      </Progress.Root>
+                    )}
                   </div>
-                  <span className="shrink-0 text-xs text-surface-400">
-                    {formatBytes(Number(mod.sizeBytes))}
-                  </span>
-                </div>
-              ))}
+                );
+              })}
               {manifest.mods.length === 0 && (
                 <p className="text-sm text-surface-400">{m.rooms_shared_profile_empty()}</p>
               )}
@@ -275,4 +390,24 @@ export function RoomDetail({ roomId }: { roomId: string }) {
       </div>
     </div>
   );
+}
+
+function publishProgressLabel(progress: RoomPublishProgress): string {
+  switch (progress.stage) {
+    case "preparing":
+      return m.rooms_publish_progress_preparing();
+    case "uploading":
+      return m.rooms_publish_progress_uploading({
+        completed: progress.completedMods,
+        total: progress.totalMods,
+      });
+    case "publishing":
+      return m.rooms_publish_progress_publishing();
+    case "finalizing":
+      return m.rooms_publish_progress_finalizing();
+    case "complete":
+      return m.rooms_publish_progress_complete();
+    case "failed":
+      return m.rooms_publish_progress_failed();
+  }
 }
